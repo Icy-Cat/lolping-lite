@@ -1,41 +1,53 @@
-//! Asset discovery and on-demand loading stubs.
+//! Asset discovery and on-demand loading.
 //!
-//! Design:
-//! - Install / repo keeps `assets/original/**` at full quality (animated WebP).
-//! - Hot path never decodes every animation up front — only resolve paths (and
-//!   later decode+cache when an emote is actually fired).
-//! - Optional derived WebM lives outside `original/` and is not required.
+//! Startup only **lists** names/paths under `assets/original/` — it does **not**
+//! decode the ~50 MB of animated WebP. Decode happens when asked
+//! (`load_emote_png_thumb`, `load_emote_webp_first_frame`).
 
+use anyhow::{anyhow, Context, Result};
+use image::RgbaImage;
 use std::path::PathBuf;
 
-/// Logical handle for a catalog lookup (expand as wheels land).
 #[derive(Debug, Clone, Copy)]
+#[allow(dead_code)]
 pub enum AssetId {
-    /// First emote found on disk — used by the skeleton probe button.
     FirstEmote,
+    Named(&'static str),
+}
+
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+pub struct EmoteEntry {
+    pub name: String,
+    pub webp: PathBuf,
+    pub png: PathBuf,
+    pub ogg: PathBuf,
 }
 
 #[derive(Debug, Default)]
 pub struct AssetCatalog {
     root: PathBuf,
-    emotes: Vec<String>,
+    emotes: Vec<EmoteEntry>,
     textures: Vec<PathBuf>,
     sounds: Vec<PathBuf>,
+    /// Single-slot cache so repeat probes don't re-decode (not a full LRU yet).
+    cached_frame: Option<(String, RgbaImage)>,
 }
 
+#[allow(dead_code)]
 impl AssetCatalog {
-    /// Locate `assets/original` relative to CWD or the executable.
     pub fn discover() -> Self {
         let root = find_assets_root().unwrap_or_else(|| PathBuf::from("assets/original"));
         let mut catalog = Self {
-            root: root.clone(),
+            root,
             ..Default::default()
         };
-        catalog.scan();
+        catalog.scan_names_only();
         catalog
     }
 
-    fn scan(&mut self) {
+    /// Directory listing only — no image decode.
+    fn scan_names_only(&mut self) {
         let emote_dir = self.root.join("emotes");
         if let Ok(rd) = std::fs::read_dir(&emote_dir) {
             let mut names = Vec::new();
@@ -48,11 +60,23 @@ impl AssetCatalog {
                 }
             }
             names.sort();
-            self.emotes = names;
+            self.emotes = names
+                .into_iter()
+                .map(|name| EmoteEntry {
+                    webp: emote_dir.join(format!("{name}.webp")),
+                    png: emote_dir.join(format!("{name}.png")),
+                    ogg: emote_dir.join(format!("{name}.ogg")),
+                    name,
+                })
+                .collect();
         }
 
         self.textures = list_files(self.root.join("textures"), &["png"]);
         self.sounds = list_files(self.root.join("sounds"), &["wav", "ogg"]);
+    }
+
+    pub fn root(&self) -> &PathBuf {
+        &self.root
     }
 
     pub fn emote_count(&self) -> usize {
@@ -67,22 +91,56 @@ impl AssetCatalog {
         self.sounds.len()
     }
 
-    /// Path to the original animated WebP — no decode yet (on-demand).
-    pub fn emote_animation_path(&self, id: AssetId) -> Option<PathBuf> {
+    pub fn emote_names(&self) -> impl Iterator<Item = &str> {
+        self.emotes.iter().map(|e| e.name.as_str())
+    }
+
+    pub fn emote(&self, id: AssetId) -> Option<&EmoteEntry> {
         match id {
-            AssetId::FirstEmote => {
-                let name = self.emotes.first()?;
-                Some(self.root.join("emotes").join(format!("{name}.webp")))
-            }
+            AssetId::FirstEmote => self.emotes.first(),
+            AssetId::Named(n) => self.emotes.iter().find(|e| e.name == n),
         }
     }
 
-    /// Future: decode WebP frames into a GPU/CPU cache when first used.
-    #[allow(dead_code)]
-    pub fn load_emote_animation_lazy(&self, id: AssetId) -> Option<PathBuf> {
-        // Placeholder for a decode+cache pipeline. Callers should treat the
-        // returned path as "load from here when needed", not preload-all.
-        self.emote_animation_path(id)
+    pub fn emote_animation_path(&self, id: AssetId) -> Option<PathBuf> {
+        self.emote(id).map(|e| e.webp.clone())
+    }
+
+    /// Cheap wheel icon (small PNG) — preferred for lists.
+    pub fn load_emote_png_thumb(&self, id: AssetId) -> Result<RgbaImage> {
+        let entry = self.emote(id).ok_or_else(|| anyhow!("unknown emote"))?;
+        let img = image::open(&entry.png)
+            .with_context(|| format!("open {}", entry.png.display()))?;
+        Ok(img.to_rgba8())
+    }
+
+    /// Decode **only the first frame** of the animated WebP (on demand).
+    pub fn load_emote_webp_first_frame(&mut self, id: AssetId) -> Result<&RgbaImage> {
+        let entry = self
+            .emote(id)
+            .ok_or_else(|| anyhow!("unknown emote"))?
+            .clone();
+
+        if self
+            .cached_frame
+            .as_ref()
+            .is_some_and(|(name, _)| name == &entry.name)
+        {
+            return Ok(&self.cached_frame.as_ref().unwrap().1);
+        }
+
+        let img = image::open(&entry.webp)
+            .with_context(|| format!("open {}", entry.webp.display()))?
+            .to_rgba8();
+        log::info!(
+            "decoded first WebP frame for '{}' ({}×{}, {} bytes raw RGBA)",
+            entry.name,
+            img.width(),
+            img.height(),
+            img.len()
+        );
+        self.cached_frame = Some((entry.name, img));
+        Ok(&self.cached_frame.as_ref().unwrap().1)
     }
 }
 
@@ -107,7 +165,6 @@ fn find_assets_root() -> Option<PathBuf> {
     let candidates = [
         PathBuf::from("assets/original"),
         PathBuf::from("../assets/original"),
-        // When launched from target/release
         PathBuf::from("../../assets/original"),
     ];
     for c in candidates {
@@ -117,9 +174,11 @@ fn find_assets_root() -> Option<PathBuf> {
     }
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
-            let c = dir.join("assets/original");
-            if c.join("emotes").is_dir() {
-                return Some(c);
+            for rel in ["assets/original", "../../../assets/original"] {
+                let c = dir.join(rel);
+                if c.join("emotes").is_dir() {
+                    return Some(c);
+                }
             }
         }
     }

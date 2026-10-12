@@ -1,6 +1,6 @@
 # Roadmap
 
-MVP skeleton (this commit) → usable Mac overlay → Windows parity → rooms.
+MVP skeleton → overlay + macOS hooks (this milestone) → wheels → Windows parity → rooms.
 
 ## Milestone 0 — Skeleton (done)
 
@@ -12,23 +12,25 @@ MVP skeleton (this commit) → usable Mac overlay → Windows parity → rooms.
 
 ## Milestone 1 — Global input hooks
 
-- [ ] macOS: `CGEventTap` for hold Option / Control + mouse drag
-- [ ] Windows: low-level keyboard / mouse hook (`WH_KEYBOARD_LL` / `WH_MOUSE_LL`)
-- [ ] Modifier-hold state machine (press → drag → release / cancel)
-- [ ] Accessibility / privilege UX (Mac permission prompt)
+- [x] macOS: `CGEventTap` (ListenOnly) for Option / Control + mouse move
+- [ ] Windows: low-level keyboard / mouse hook (`WH_KEYBOARD_LL` / `WH_MOUSE_LL`) — stub only
+- [x] Modifier-hold state machine (press → drag tracking → release); wheels not drawn yet
+- [x] Accessibility / privilege UX (Mac prompt + in-app message)
+- [ ] Active-filter key swallow while gesture armed (still ListenOnly / conservative)
 
 ## Milestone 2 — Transparent click-through overlay
 
-- [ ] eframe / winit transparent window, always-on-top
-- [ ] Runtime toggle mouse passthrough (ignore clicks when idle)
+- [x] eframe transparent window + `clear_color` alpha 0 + always-on-top
+- [x] Runtime toggle mouse passthrough (Idle ON · gesture/debug OFF)
 - [ ] Multi-monitor placement (one overlay or per-display — decide on Mac first)
-- [ ] Hot path: no per-frame heap alloc for wheel geometry
+- [x] Hot path: gesture snapshot via `Arc<Mutex>` / channel; no per-move log spam
+- [ ] Decorations-free fullscreen overlay surface
 
 ## Milestone 3 — Ping + emote wheels
 
 - [ ] 8-slice ping wheel using `assets/original/textures/`
 - [ ] Emote wheel slots using PNG thumbnails
-- [ ] Play animated WebP on release (decode + cache; keep original quality)
+- [x] On-demand WebP **first frame** decode API (full animation playback later)
 - [ ] Cancel rules: center release, right-click, Esc
 
 ## Milestone 4 — Audio
