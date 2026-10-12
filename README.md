@@ -1,110 +1,54 @@
 # lolPing-lite
 
-Ultra-light Rust rewrite of [darrenprx/lolPing](https://github.com/darrenprx/lolPing):
-League of Legends-style desktop ping / emote wheels without Electron.
+Ultra-light **Rust** rewrite of [darrenprx/lolPing](https://github.com/darrenprx/lolPing):
+desktop ping / emote wheels **without Electron**.
 
-**Goals:** extreme binary size, extreme overlay performance, macOS Apple Silicon
-first (Windows architecture reserved).
+**Goals:** tiny binary, fast overlay, macOS Apple Silicon first.
 
 ## Status
 
-Milestone 3 (wheels) landed: transparent always-on-top window, runtime mouse
-passthrough state machine, macOS `CGEventTap` skeleton, on-demand WebP first-frame
-load. Full wheels / audio / rooms are not done — see [docs/PLAN.md](docs/PLAN.md).
+Wheels, settings, LAN rooms, and `--simulate` are in. See [docs/FEATURES.md](docs/FEATURES.md)
+and [docs/PLAN.md](docs/PLAN.md).
 
-## Why rewrite?
-
-| | Electron lolPing | lolPing-lite (target) |
-|---|---|---|
-| Shell | Chromium + Electron (~150+ MiB) | Native Rust + egui |
-| Install (Mac arm64) | ~175 MiB DMG / ~346 MB .app | Aim for single-digit–low tens of MiB with on-demand assets |
-| UI | React + Fluent | egui / eframe |
-| Input | Native C++ / Swift helper | `CGEventTap` on Mac (Windows hooks later) |
-| Overlay | Browser transparent window | egui transparent + mouse passthrough |
-
-## Volume strategy
-
-1. **No Electron / no Chromium** — biggest win.
-2. **Keep original animated WebP** as the quality source of truth (see
-   [ASSETS.md](ASSETS.md)). Optional WebM CRF≈10 is derivative only.
-3. **On-demand asset load** — startup only lists paths; PNG thumbs / WebP first
-   frame decode when requested (never preload all ~50 MB animations).
-4. **Release profile** — LTO, `opt-level = "z"`, strip, `panic = "abort"`.
-
-## Assets (not MIT)
-
-Files under `assets/original/` are © Riot Games. See [ASSETS.md](ASSETS.md).
-Code is MIT; assets are not open-sourced.
-
-## Wheels (Milestone 3)
-
-- Hold **⌥ Option** (or **Alt** in-window) and drag → 8-slice **ping** wheel; release on a slice to place.
-- Hold **⌃ Control** (or **Ctrl**) → **emote** wheel; release plays that emote's animated WebP (decoded on demand, one emote cached).
-- Release in the center or press **Esc** to cancel.
-- Audio: stub (logs path); rodio blocked on rustc 1.85 / encoding_rs.
-
-## Build
-
-Requires [Rust stable](https://rustup.rs/) (see `rust-toolchain.toml`).
+## Build & test
 
 ```bash
 cargo build --release
-./target/release/lolping-lite
+cargo test --release
+./target/release/lolping-lite --simulate   # headless E2E of gesture + room crypto
+./target/release/lolping-lite             # GUI
+./target/release/lolping-lite --settings  # GUI with settings open
 ```
 
-Useful logs:
+Release binary is typically **~8 MiB** (vs Electron ~175 MiB DMG).
 
-```bash
-RUST_LOG=info ./target/release/lolping-lite
-```
+### macOS
 
-### macOS — Accessibility permission (required for global hooks)
+1. **Accessibility** required for global ⌥/⌃ hooks (System Settings → Privacy & Security).
+2. Without it, use **Alt/Ctrl inside the window** to test wheels.
+3. **Open at login** writes `~/Library/LaunchAgents/com.icy-cat.lolping-lite.plist`.
 
-Global Option / Control hold detection uses **`CGEventTap`**, which needs
-**Privacy & Security → Accessibility** for the app that launches lolPing-lite
-(the binary itself, or Terminal / your IDE if you run from there).
+### Rooms (LAN)
 
-1. Build and run once — macOS may prompt; if not, open **System Settings**.
-2. Enable the hosting app under **Accessibility**.
-3. Restart lolPing-lite.
+Create/Join a `PING-XXXXX-XXXXX` code in the debug/settings window. Same Wi‑Fi:
+encrypted UDP on port **47474** (lolPing-compatible envelope). Internet/Nostr is stubbed.
 
-Without permission the UI still opens and shows a yellow notice; hooks stay
-inactive (`NeedsAccessibility`).
+### Assets
 
-**Try gestures:** unpin “Pin debug UI”, then hold **⌥ Option** (ping) or
-**⌃ Control** (emote). Hold **⌥+⌃** together to re-pin debug while click-through.
+`assets/original/**` are © Riot Games — see [ASSETS.md](ASSETS.md). Code is MIT.
 
-**Swallow policy:** the tap is **ListenOnly** — modifiers are not swallowed yet.
-
-### Windows (planned)
-
-Same crate; `src/input/windows.rs` is a stub. No low-level hooks yet.
-
-### Linux
-
-Builds for CI; global hooks report `Unsupported`. Overlay APIs are best-effort
-under X11/Wayland.
-
-## Project layout
+## Layout
 
 ```
-src/
-  main.rs          # transparent + always-on-top + initial passthrough
-  app.rs           # debug HUD / preview
-  overlay.rs       # Idle · Ping · Emote · DebugUi state machine
-  assets.rs        # list + on-demand PNG / WebP first frame
-  input/
-    mod.rs         # hub + crate evaluation notes
-    macos.rs       # CGEventTap glue
-    windows.rs     # stub
-    stub.rs        # non-Mac/Win
-docs/PLAN.md
-ASSETS.md
+src/lib.rs          library (testable)
+src/main.rs         CLI + GUI
+src/wheel.rs        ping/emote geometry
+src/gesture.rs      hold→wheel→place
+src/room/           code, AES-GCM, LAN, Nostr stub
+src/settings.rs     JSON settings
+src/simulate.rs     --simulate harness
 ```
 
 ## License
 
-- **Code:** [MIT](LICENSE)
-- **Ping / emote icons, animations, sounds:** © Riot Games — not covered by MIT
-
-Not endorsed by Riot Games.
+Code MIT; ping/emote media © Riot Games. Not endorsed by Riot Games.

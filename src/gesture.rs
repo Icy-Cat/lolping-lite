@@ -17,18 +17,6 @@ pub struct ActiveWheel {
     pub hover: Option<usize>,
 }
 
-#[derive(Debug, Clone, Copy)]
-pub enum GestureCommand {
-    /// Open wheel centered at cursor.
-    Begin { kind: GestureKind, center: Pos2 },
-    /// Update hover from cursor.
-    Move { cursor: Pos2 },
-    /// Modifier released — place hover slot or cancel (dead-zone).
-    End { cursor: Pos2 },
-    /// Esc / explicit cancel.
-    Cancel,
-}
-
 #[derive(Debug, Clone)]
 pub enum GestureOutcome {
     None,
@@ -76,7 +64,6 @@ impl GestureSession {
             return GestureOutcome::None;
         }
 
-        // Rising edges — prefer ping if both (chord handled by overlay debug).
         let ping_rise = ping_down && !self.prev_ping;
         let emote_rise = emote_down && !self.prev_emote;
         let ping_fall = !ping_down && self.prev_ping;
@@ -124,9 +111,7 @@ impl GestureSession {
     pub fn hover_label(&self) -> String {
         match &self.wheel {
             Some(w) => match (w.kind, w.hover) {
-                (GestureKind::Ping, Some(i)) => {
-                    format!("ping: {}", wheel::PINGS[i].label)
-                }
+                (GestureKind::Ping, Some(i)) => format!("ping: {}", wheel::PINGS[i].label),
                 (GestureKind::Ping, None) => "ping: cancel".into(),
                 (GestureKind::Emote, Some(i)) => format!("emote slot {i}"),
                 (GestureKind::Emote, None) => "emote: cancel".into(),

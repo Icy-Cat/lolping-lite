@@ -1,19 +1,33 @@
-//! lolPing-lite — ultra-light desktop ping / emote overlay (Rust).
+//! lolPing-lite binary entry.
 
-mod app;
-mod assets;
-mod audio;
-mod fx;
-mod gesture;
-mod input;
-mod overlay;
-mod wheel;
-
+use clap::Parser;
+use lolping_lite::simulate;
 use anyhow::Result;
-use eframe::egui;
+
+#[derive(Parser, Debug)]
+#[command(name = "lolping-lite", about = "Ultra-light LoL-style desktop ping / emote overlay")]
+struct Cli {
+    /// Headless checks: gesture state machine, room code/crypto (no window).
+    #[arg(long)]
+    simulate: bool,
+
+    /// Open settings panel pinned on launch.
+    #[arg(long)]
+    settings: bool,
+}
 
 fn main() -> Result<()> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
+    let cli = Cli::parse();
+    if cli.simulate {
+        std::process::exit(simulate::run_simulate());
+    }
+    run_gui(cli.settings)
+}
+
+fn run_gui(open_settings: bool) -> Result<()> {
+    use eframe::egui;
+    use lolping_lite::app::LolPingApp;
 
     let native_options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
@@ -30,9 +44,8 @@ fn main() -> Result<()> {
     eframe::run_native(
         "lolPing-lite",
         native_options,
-        Box::new(|cc| Ok(Box::new(app::LolPingApp::new(cc)))),
+        Box::new(move |cc| Ok(Box::new(LolPingApp::new(cc, open_settings)))),
     )
     .map_err(|e| anyhow::anyhow!("eframe failed: {e}"))?;
-
     Ok(())
 }
