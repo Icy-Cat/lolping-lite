@@ -54,17 +54,18 @@ pub fn click_is_on_fullscreen_app(x: f64, y: f64) -> bool {
     use core_foundation::number::CFNumber;
     use core_foundation::string::CFString;
     use core_graphics::display::CGDisplay;
-    use core_graphics::geometry::{CGPoint, CGRect};
+    use core_graphics::geometry::CGRect;
     use core_graphics::window::{
         copy_window_info, kCGNullWindowID, kCGWindowListExcludeDesktopElements,
         kCGWindowListOptionOnScreenOnly,
     };
 
-    let Ok((ids, n)) = CGDisplay::displays_with_point(CGPoint::new(x, y), 1) else { return false };
-    if n == 0 {
+    let Ok(ids) = CGDisplay::active_displays() else { return false };
+    let Some(db) = ids.into_iter().map(|id| CGDisplay::new(id).bounds()).find(|b| {
+        x >= b.origin.x && y >= b.origin.y && x < b.origin.x + b.size.width && y < b.origin.y + b.size.height
+    }) else {
         return false;
-    }
-    let db = CGDisplay::new(ids[0]).bounds();
+    };
     let to_rect = |r: CGRect| Rect {
         left: r.origin.x.round() as i32,
         top: r.origin.y.round() as i32,
