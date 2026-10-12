@@ -1,0 +1,8 @@
+/target/
+**/*.rs.bk
+.DS_Store
+*.pdb
+dist/
+release/
+# Optional derived assets (never replace originals)
+assets/derived/
