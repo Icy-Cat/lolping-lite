@@ -42,6 +42,7 @@ pub struct LolPingApp {
     event_log: VecDeque<String>,
     /// Which display the active wheel is on.
     wheel_display: u32,
+    asset_gen: u64,
 }
 
 impl LolPingApp {
@@ -72,7 +73,7 @@ impl LolPingApp {
             catalog.emote_count(),
             displays.len()
         );
-        Self {
+        let app = Self {
             catalog,
             input: InputHub::start(cfg),
             overlay: OverlayController::default(),
@@ -93,7 +94,10 @@ impl LolPingApp {
             emote_gpu_cache: None,
             event_log: VecDeque::new(),
             wheel_display: 1,
-        }
+            asset_gen: 0,
+        };
+        app.prefetch_wheels();
+        app
     }
 
     fn log(&mut self, line: impl Into<String>) {
@@ -120,8 +124,15 @@ impl LolPingApp {
         if self.ping_icons_ready {
             return;
         }
+        let mut missing = false;
         for (i, def) in PINGS.iter().enumerate() {
-            let path = self.catalog.texture_path(def.texture_file);
+            if self.ping_icons[i].is_some() {
+                continue;
+            }
+            let Some(path) = self.catalog.texture_path(def.texture_file) else {
+                missing = true;
+                continue;
+            };
             if let Ok(rgba) = self.catalog.load_png(&path) {
                 self.ping_icons[i] = Some(fx::upload_rgba(
                     ctx,
@@ -132,13 +143,14 @@ impl LolPingApp {
                 ));
             }
         }
-        self.ping_icons_ready = true;
+        self.ping_icons_ready = !missing;
     }
 
     fn ensure_emote_icons(&mut self, ctx: &egui::Context) {
         if self.emote_icons_ready {
             return;
         }
+        let mut missing = false;
         for i in 0..WHEEL_SLOTS {
             let name = &self.emote_slot_names[i];
             if name.is_empty() {
@@ -151,7 +163,14 @@ impl LolPingApp {
                 .enumerate()
                 .find(|(_, e)| e.name == *name)
             {
-                if let Ok(rgba) = self.catalog.load_emote_png_thumb(AssetId::Index(idx)) {
+                if self.emote_icons[i].is_some() {
+                    continue;
+                }
+                let Ok(rgba) = self.catalog.load_emote_png_thumb(AssetId::Index(idx)) else {
+                    missing = true;
+                    continue;
+                };
+                {
                     self.emote_icons[i] = Some(fx::upload_rgba(
                         ctx,
                         format!("emote-thumb-{i}"),
@@ -162,7 +181,43 @@ impl LolPingApp {
                 }
             }
         }
-        self.emote_icons_ready = true;
+        self.emote_icons_ready = !missing;
+    }
+
+    /// Background prefetch of everything the current wheels need.
+    fn prefetch_wheels(&self) {
+        let mut rels: Vec<String> = Vec::new();
+        for n in self.emote_slot_names.iter().filter(|n| !n.is_empty()) {
+            for ext in ["png", "webp", "ogg"] {
+                rels.push(format!("emotes/{n}.{ext}"));
+            }
+        }
+        for p in PINGS.iter() {
+            rels.push(format!("textures/{}", p.texture_file));
+            if let Some(snd) = p.sound_file {
+                rels.push(format!("sounds/{snd}"));
+            }
+        }
+        self.catalog.prefetch(&rels);
+    }
+
+    /// Pick up newly downloaded assets / a freshly fetched manifest.
+    fn poll_assets(&mut self) {
+        let Some(gen) = self.catalog.store().map(|s| s.generation.load(std::sync::atomic::Ordering::Relaxed)) else {
+            return;
+        };
+        if gen == self.asset_gen {
+            return;
+        }
+        self.asset_gen = gen;
+        if self.catalog.rescan() {
+            let names: Vec<String> = self.catalog.emotes().iter().map(|e| e.name.clone()).collect();
+            self.settings.ensure_emote_wheel(&names);
+            self.sync_emote_slots_from_settings();
+            self.prefetch_wheels();
+        }
+        self.ping_icons_ready = false;
+        self.emote_icons_ready = false;
     }
 
     fn sync_emote_slots_from_settings(&mut self) {
@@ -227,7 +282,9 @@ impl LolPingApp {
             self.layer_mut(display_num).push_ping(at, tex);
         }
         if let Some(s) = def.sound_file {
-            self.audio.play_file(&self.catalog.sound_path(s));
+            if let Some(p) = self.catalog.sound_path(s) {
+                self.audio.play_file(&p);
+            }
         }
         let (d, fx, fy) = display::point_to_frac(&self.displays, gx, gy);
         self.room.broadcast_ping(def.id, d, fx, fy);
@@ -252,8 +309,14 @@ impl LolPingApp {
         if let Some(anim) = self.load_emote_gpu(ctx, &name) {
             self.layer_mut(display_num).push_emote(at, anim);
         }
-        if let Some(entry) = self.catalog.emotes().iter().find(|e| e.name == name) {
-            self.audio.play_file(&entry.ogg);
+        if let Some(p) = self
+            .catalog
+            .emotes()
+            .iter()
+            .find(|e| e.name == name)
+            .and_then(|e| self.catalog.resolve(&e.ogg))
+        {
+            self.audio.play_file(&p);
         }
         let (d, fx, fy) = display::point_to_frac(&self.displays, gx, gy);
         self.room.broadcast_emote(&name, d, fx, fy);
@@ -354,6 +417,7 @@ impl eframe::App for LolPingApp {
     }
 
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.poll_assets();
         // Pause hotkey from hooks
         for ev in self.input.poll() {
             if matches!(ev, InputEvent::ToggleEnabled) {
@@ -664,6 +728,8 @@ impl LolPingApp {
             self.settings.emote_wheel[i] = cur;
         }
 
+        ui.separator();
+        self.draw_asset_settings(ui);
         ui.weak("Auto-update: stub (deferred)");
         if ui.button("Save settings").clicked() {
             apply_launch_at_login(self.settings.launch_at_login);
@@ -675,6 +741,55 @@ impl LolPingApp {
                 Ok(()) => self.log("settings saved"),
                 Err(e) => self.log(format!("save failed: {e:#}")),
             }
+        }
+    }
+}
+
+impl LolPingApp {
+    fn draw_asset_settings(&mut self, ui: &mut egui::Ui) {
+        use crate::remote::BulkState;
+        use std::sync::atomic::Ordering;
+        ui.strong("Assets");
+        let Some(store) = self.catalog.store().cloned() else { return };
+        match &store.local_root {
+            Some(p) => ui.weak(format!("Local bundle: {}", p.display())),
+            None => ui.weak(format!("Source: {}", store.base)),
+        };
+        if let Some(d) = &store.cache_dir {
+            ui.weak(format!("Cache: {}", d.display()));
+        }
+        let mb = |b: u64| b as f64 / 1_048_576.0;
+        ui.label(format!("Cache size: {:.1} MB", mb(store.cache_size())));
+        let state = store.bulk_state.lock().unwrap().clone();
+        ui.horizontal(|ui| {
+            let running = matches!(state, BulkState::Running);
+            if ui.add_enabled(!running, egui::Button::new("Download all assets")).clicked() {
+                store.download_all_bg();
+            }
+            if ui.add_enabled(!running, egui::Button::new("Clear cache")).clicked() {
+                match store.clear_cache() {
+                    Ok(()) => self.log("asset cache cleared"),
+                    Err(e) => self.log(format!("clear cache failed: {e:#}")),
+                }
+            }
+        });
+        match state {
+            BulkState::Running => {
+                let done = store.bulk_done.load(Ordering::Relaxed);
+                let total = store.bulk_total.load(Ordering::Relaxed).max(1);
+                ui.add(
+                    egui::ProgressBar::new((done as f32 / total as f32).min(1.0))
+                        .text(format!("{:.1} / {:.1} MB", mb(done), mb(total))),
+                );
+                ui.ctx().request_repaint_after(std::time::Duration::from_millis(200));
+            }
+            BulkState::Done(n) => {
+                ui.weak(format!("Downloaded + verified {n} files"));
+            }
+            BulkState::Failed(e) => {
+                ui.colored_label(egui::Color32::LIGHT_RED, format!("Download failed: {e}"));
+            }
+            BulkState::Idle => {}
         }
     }
 }

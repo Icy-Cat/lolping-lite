@@ -9,6 +9,7 @@ pub mod gesture;
 pub mod i18n;
 pub mod input;
 pub mod overlay;
+pub mod remote;
 pub mod room;
 pub mod settings;
 pub mod simulate;

@@ -36,6 +36,9 @@ rodio = { version = "0.19", features = ["wav", "vorbis", "symphonia-all"] }
 tungstenite = { version = "0.24", features = ["native-tls"] }
 url = "2"
 base64 = "0.22"
+native-tls = "0.2"
+ureq = { version = "2", default-features = false, features = ["native-tls"] }
+zip = { version = "0.6", default-features = false, features = ["deflate"] }
 k256 = { version = "0.13", features = ["schnorr"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]

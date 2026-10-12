@@ -140,6 +140,8 @@ pub fn run_simulate() -> i32 {
     let plain = open_packet(&keys.msg_key, &sealed).unwrap();
     expect(plain == emote_msg, "remote emote envelope", &mut failed);
 
+    online_asset_check(&mut failed);
+
     if failed == 0 {
         println!("simulate: all checks passed");
         0
@@ -154,4 +156,86 @@ fn expect(cond: bool, msg: &str, failed: &mut u32) {
         eprintln!("FAIL {msg}");
         *failed += 1;
     }
+}
+
+/// Live CDN check: manifest + one emote + sha256. Skips gracefully when offline.
+/// With `LOLPING_NO_LOCAL_ASSETS=1`, also proves the catalog/on-demand path end to end
+/// (names from manifest → non-blocking resolve schedules download → file lands in cache → decode).
+fn online_asset_check(failed: &mut u32) {
+    use crate::assets::{AssetCatalog, AssetId};
+    use crate::remote::{
+        cache_dir_under, local_assets_disabled, platform_cache_root, sha256_hex, AssetStore,
+        Manifest, base_url,
+    };
+    use std::sync::Arc;
+    if std::env::var("LOLPING_OFFLINE").as_deref() == Ok("1") {
+        println!("simulate: online asset check skipped (LOLPING_OFFLINE=1)");
+        return;
+    }
+    // Fresh temp cache so the check really downloads.
+    let tmp = std::env::temp_dir().join(format!("lolping-sim-{}", std::process::id()));
+    let store = Arc::new(AssetStore::new(None, Some(cache_dir_under(&tmp)), base_url()));
+    let m: Arc<Manifest> = match store.refresh_manifest_blocking() {
+        Ok(m) => m,
+        Err(e) => {
+            println!("simulate: online asset check skipped (offline? {e:#})");
+            let _ = std::fs::remove_dir_all(&tmp);
+            return;
+        }
+    };
+    expect(m.files.len() > 100, "manifest file count", failed);
+    let rel = "emotes/angry_kitty.webp";
+    match store.fetch_blocking(rel) {
+        Ok(p) => {
+            let bytes = std::fs::read(&p).unwrap_or_default();
+            let want = m.get(rel).map(|f| f.sha256.clone()).unwrap_or_default();
+            expect(sha256_hex(&bytes) == want, "cdn emote sha256", failed);
+            println!("simulate: cdn ok ({} files in manifest, {rel} {} bytes verified)", m.files.len(), bytes.len());
+        }
+        Err(e) => {
+            eprintln!("FAIL cdn fetch {rel}: {e:#}");
+            *failed += 1;
+        }
+    }
+
+    if local_assets_disabled() {
+        let mut cat = AssetCatalog::with_store(store.clone());
+        expect(cat.emote_count() == m.emote_names().len(), "catalog names from manifest", failed);
+        let idx = cat.emotes().iter().position(|e| e.name == "angry_kitty").unwrap_or(0);
+        let name = cat.emotes().get(idx).map(|e| e.name.clone()).unwrap_or_default();
+        let snd = "sounds/OnMyWay.wav";
+        // Non-blocking: first call must return None and schedule download.
+        expect(cat.resolve(snd).is_none(), "resolve non-blocking miss", failed);
+        let t0 = std::time::Instant::now();
+        while cat.resolve(snd).is_none() && t0.elapsed().as_secs() < 30 {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        match cat.resolve(snd) {
+            Some(p) => {
+                expect(decode_file(&p).map(|n| n > 0).unwrap_or(false), "on-demand wav decode", failed);
+            }
+            None => {
+                eprintln!("FAIL on-demand sound never arrived");
+                *failed += 1;
+            }
+        }
+        expect(cat.load_emote_animation(AssetId::Index(idx)).map(|a| !a.frames.is_empty()).unwrap_or(false),
+            "on-demand emote decode (cached webp)", failed);
+        println!("simulate: no-local-assets on-demand path ok (emote '{name}', {snd})");
+        // Real user cache path sanity.
+        expect(platform_cache_root().is_some(), "platform cache root", failed);
+    }
+    if std::env::var("LOLPING_SIM_FULL").as_deref() == Ok("1") {
+        match store.download_all_blocking() {
+            Ok(n) => {
+                expect(n == m.files.len(), "full zip file count", failed);
+                println!("simulate: full zip ok ({n} files verified, cache {} bytes)", store.cache_size());
+            }
+            Err(e) => {
+                eprintln!("FAIL full zip: {e:#}");
+                *failed += 1;
+            }
+        }
+    }
+    let _ = std::fs::remove_dir_all(&tmp);
 }

@@ -5,6 +5,8 @@ use image::{AnimationDecoder, RgbaImage};
 use std::fs::File;
 use std::io::BufReader;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use crate::remote::AssetStore;
 
 #[derive(Debug, Clone, Copy)]
 pub enum AssetId {
@@ -16,9 +18,10 @@ pub enum AssetId {
 #[derive(Debug, Clone)]
 pub struct EmoteEntry {
     pub name: String,
-    pub webp: PathBuf,
-    pub png: PathBuf,
-    pub ogg: PathBuf,
+    /// Paths relative to the asset root (`emotes/<name>.webp` …).
+    pub webp: String,
+    pub png: String,
+    pub ogg: String,
 }
 
 /// Decoded animation for one emote (single-slot cache payload).
@@ -33,6 +36,7 @@ pub struct EmoteAnimation {
 #[derive(Debug, Default)]
 pub struct AssetCatalog {
     root: PathBuf,
+    store: Option<Arc<AssetStore>>,
     emotes: Vec<EmoteEntry>,
     textures: Vec<PathBuf>,
     sounds: Vec<PathBuf>,
@@ -41,42 +45,78 @@ pub struct AssetCatalog {
 }
 
 impl AssetCatalog {
+    /// Local bundle if present, else cache + CDN via the global [`AssetStore`].
     pub fn discover() -> Self {
-        let root = find_assets_root().unwrap_or_else(|| PathBuf::from("assets/original"));
+        let store = AssetStore::global().clone();
+        store.refresh_manifest_bg(false);
+        Self::with_store(store)
+    }
+
+    pub fn with_store(store: Arc<AssetStore>) -> Self {
+        let root = store
+            .local_root
+            .clone()
+            .or_else(|| store.cache_dir.clone())
+            .unwrap_or_else(|| PathBuf::from("assets/original"));
         let mut catalog = Self {
             root,
+            store: Some(store),
             ..Default::default()
         };
-        catalog.scan_names_only();
+        catalog.rescan();
         catalog
     }
 
-    fn scan_names_only(&mut self) {
-        let emote_dir = self.root.join("emotes");
-        if let Ok(rd) = std::fs::read_dir(&emote_dir) {
-            let mut names = Vec::new();
-            for entry in rd.flatten() {
-                let path = entry.path();
-                if path.extension().and_then(|e| e.to_str()) == Some("webp") {
-                    if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
-                        names.push(stem.to_string());
-                    }
+    /// Re-read emote names (e.g. once the manifest arrives). Returns true if changed.
+    pub fn rescan(&mut self) -> bool {
+        let before = self.emotes.len();
+        let mut names = Vec::new();
+        if let Some(local) = self.store.as_ref().and_then(|s| s.local_root.clone()) {
+            for p in list_files(local.join("emotes"), &["webp"]) {
+                if let Some(stem) = p.file_stem().and_then(|s| s.to_str()) {
+                    names.push(stem.to_string());
                 }
             }
-            names.sort();
-            self.emotes = names
-                .into_iter()
-                .map(|name| EmoteEntry {
-                    webp: emote_dir.join(format!("{name}.webp")),
-                    png: emote_dir.join(format!("{name}.png")),
-                    ogg: emote_dir.join(format!("{name}.ogg")),
-                    name,
-                })
-                .collect();
+            self.textures = list_files(local.join("textures"), &["png"]);
+            self.sounds = list_files(local.join("sounds"), &["wav", "ogg"]);
+        } else if let Some(m) = self.store.as_ref().and_then(|s| s.manifest()) {
+            names = m.emote_names();
+            let pick = |pre: &str| -> Vec<PathBuf> {
+                m.files.iter().filter(|f| f.path.starts_with(pre)).map(|f| PathBuf::from(&f.path)).collect()
+            };
+            self.textures = pick("textures/");
+            self.sounds = pick("sounds/");
         }
+        names.sort();
+        self.emotes = names
+            .into_iter()
+            .map(|name| EmoteEntry {
+                webp: format!("emotes/{name}.webp"),
+                png: format!("emotes/{name}.png"),
+                ogg: format!("emotes/{name}.ogg"),
+                name,
+            })
+            .collect();
+        self.emotes.len() != before
+    }
 
-        self.textures = list_files(self.root.join("textures"), &["png"]);
-        self.sounds = list_files(self.root.join("sounds"), &["wav", "ogg"]);
+    /// Non-blocking: path if available now, else schedules a download and returns None.
+    pub fn resolve(&self, rel: &str) -> Option<PathBuf> {
+        match &self.store {
+            Some(s) => s.resolve(rel),
+            None => Some(self.root.join(rel)).filter(|p| p.is_file()),
+        }
+    }
+
+    pub fn store(&self) -> Option<&Arc<AssetStore>> {
+        self.store.as_ref()
+    }
+
+    /// Background prefetch of the given relative paths.
+    pub fn prefetch(&self, rels: &[String]) {
+        if let Some(s) = &self.store {
+            s.request_many(rels.iter().map(|s| s.as_str()));
+        }
     }
 
     pub fn root(&self) -> &PathBuf {
@@ -107,12 +147,14 @@ impl AssetCatalog {
         }
     }
 
-    pub fn texture_path(&self, file: &str) -> PathBuf {
-        self.root.join("textures").join(file)
+    /// Resolved texture path, or None while it downloads.
+    pub fn texture_path(&self, file: &str) -> Option<PathBuf> {
+        self.resolve(&format!("textures/{file}"))
     }
 
-    pub fn sound_path(&self, file: &str) -> PathBuf {
-        self.root.join("sounds").join(file)
+    /// Resolved sound path, or None while it downloads.
+    pub fn sound_path(&self, file: &str) -> Option<PathBuf> {
+        self.resolve(&format!("sounds/{file}"))
     }
 
     pub fn load_png(&self, path: &Path) -> Result<RgbaImage> {
@@ -122,7 +164,8 @@ impl AssetCatalog {
 
     pub fn load_emote_png_thumb(&self, id: AssetId) -> Result<RgbaImage> {
         let entry = self.emote(id).ok_or_else(|| anyhow!("unknown emote"))?;
-        self.load_png(&entry.png)
+        let p = self.resolve(&entry.png).ok_or_else(|| anyhow!("{} downloading", entry.png))?;
+        self.load_png(&p)
     }
 
     /// Decode **one** animated WebP into frames (replaces single-slot cache).
@@ -140,7 +183,10 @@ impl AssetCatalog {
             return Ok(self.cached_anim.as_ref().unwrap());
         }
 
-        let anim = decode_webp_animation(&entry.webp, &entry.name)?;
+        let path = self
+            .resolve(&entry.webp)
+            .ok_or_else(|| anyhow!("{} not ready (downloading)", entry.webp))?;
+        let anim = decode_webp_animation(&path, &entry.name)?;
         log::info!(
             "decoded emote '{}' animation: {} frames (on-demand, single-slot cache)",
             anim.name,
@@ -214,30 +260,6 @@ fn list_files(dir: PathBuf, exts: &[&str]) -> Vec<PathBuf> {
     }
     out.sort();
     out
-}
-
-fn find_assets_root() -> Option<PathBuf> {
-    let candidates = [
-        PathBuf::from("assets/original"),
-        PathBuf::from("../assets/original"),
-        PathBuf::from("../../assets/original"),
-    ];
-    for c in candidates {
-        if c.join("emotes").is_dir() {
-            return Some(c);
-        }
-    }
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(dir) = exe.parent() {
-            for rel in ["assets/original", "../../../assets/original"] {
-                let c = dir.join(rel);
-                if c.join("emotes").is_dir() {
-                    return Some(c);
-                }
-            }
-        }
-    }
-    None
 }
 
 #[cfg(test)]
