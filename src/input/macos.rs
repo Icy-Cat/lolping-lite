@@ -1,37 +1,32 @@
-//! macOS global input via `CGEventTap` (ListenOnly).
-//!
-//! Platform glue lives here (`#[cfg(target_os = "macos")]` from `mod.rs`).
-//! Requires Accessibility (Privacy → Accessibility) for the hosting process.
+//! macOS CGEventTap — respects SharedConfig triggers + pause (Ctrl+Alt+P).
 
-use super::{HookStatus, InputEvent, SharedInput};
+use super::{HookStatus, InputConfig, InputEvent, SharedConfig, SharedInput};
 use core_foundation::runloop::{kCFRunLoopCommonModes, CFRunLoop};
 use core_graphics::event::{
     CGEvent, CGEventFlags, CGEventTap, CGEventTapLocation, CGEventTapOptions,
-    CGEventTapPlacement, CGEventType,
+    CGEventTapPlacement, CGEventType, EventField,
 };
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Sender;
 use std::sync::Arc;
 
-pub fn spawn(tx: Sender<InputEvent>, shared: SharedInput) -> HookStatus {
+/// ANSI P on US keyboard (kVK_ANSI_P).
+const KEY_P: i64 = 0x23;
+
+pub fn spawn(tx: Sender<InputEvent>, shared: SharedInput, config: SharedConfig) -> HookStatus {
     if !accessibility_trusted(true) {
         let _ = tx.send(InputEvent::Status(HookStatus::NeedsAccessibility));
-        log::warn!(
-            "Accessibility not granted — open System Settings → Privacy & Security → Accessibility"
-        );
         return HookStatus::NeedsAccessibility;
     }
-
     let tx_thread = tx.clone();
     std::thread::Builder::new()
         .name("lolping-cgeventtap".into())
         .spawn(move || {
-            if let Err(status) = run_tap(tx_thread.clone(), shared) {
+            if let Err(status) = run_tap(tx_thread.clone(), shared, config) {
                 let _ = tx_thread.send(InputEvent::Status(status));
             }
         })
         .ok();
-
     HookStatus::Starting
 }
 
@@ -43,15 +38,20 @@ fn accessibility_trusted(prompt: bool) -> bool {
     }
 }
 
-fn run_tap(tx: Sender<InputEvent>, shared: SharedInput) -> Result<(), HookStatus> {
+fn run_tap(
+    tx: Sender<InputEvent>,
+    shared: SharedInput,
+    config: SharedConfig,
+) -> Result<(), HookStatus> {
     let last_ping = Arc::new(AtomicBool::new(false));
     let last_emote = Arc::new(AtomicBool::new(false));
     let tx_cb = tx.clone();
     let last_ping_cb = last_ping.clone();
     let last_emote_cb = last_emote.clone();
 
-    let events_of_interest = vec![
+    let events = vec![
         CGEventType::FlagsChanged,
+        CGEventType::KeyDown,
         CGEventType::MouseMoved,
         CGEventType::LeftMouseDragged,
         CGEventType::RightMouseDragged,
@@ -61,20 +61,42 @@ fn run_tap(tx: Sender<InputEvent>, shared: SharedInput) -> Result<(), HookStatus
     let tap = CGEventTap::new(
         CGEventTapLocation::HID,
         CGEventTapPlacement::HeadInsertEventTap,
-        // Conservative: listen only — do not swallow Option/Control.
         CGEventTapOptions::ListenOnly,
-        events_of_interest,
+        events,
         move |_proxy, ev_type, event: &CGEvent| {
+            let cfg = config.lock().ok().map(|c| c.clone());
+            let Some(cfg) = cfg else {
+                return Some(event.clone());
+            };
+
             match ev_type {
                 CGEventType::FlagsChanged => {
                     let flags = event.get_flags();
-                    let ping = flags.contains(CGEventFlags::CGEventFlagAlternate);
-                    let emote = flags.contains(CGEventFlags::CGEventFlagControl);
+                    let alt = flags.contains(CGEventFlags::CGEventFlagAlternate);
+                    let ctrl = flags.contains(CGEventFlags::CGEventFlagControl);
+                    let shift = flags.contains(CGEventFlags::CGEventFlagShift);
+                    let meta = flags.contains(CGEventFlags::CGEventFlagCommand);
+                    let (ping, emote) = if cfg.enabled {
+                        cfg.map_modifiers(alt, ctrl, shift, meta)
+                    } else {
+                        (false, false)
+                    };
                     if last_ping_cb.swap(ping, Ordering::SeqCst) != ping {
                         let _ = tx_cb.send(InputEvent::PingModifier { down: ping });
                     }
                     if last_emote_cb.swap(emote, Ordering::SeqCst) != emote {
                         let _ = tx_cb.send(InputEvent::EmoteModifier { down: emote });
+                    }
+                }
+                CGEventType::KeyDown => {
+                    let key = event.get_integer_value_field(EventField::KEYBOARD_EVENT_KEYCODE);
+                    let flags = event.get_flags();
+                    let alt = flags.contains(CGEventFlags::CGEventFlagAlternate);
+                    let ctrl = flags.contains(CGEventFlags::CGEventFlagControl);
+                    let shift = flags.contains(CGEventFlags::CGEventFlagShift);
+                    let meta = flags.contains(CGEventFlags::CGEventFlagCommand);
+                    if key == KEY_P && cfg.pause_chord_matches(alt, ctrl, shift, meta) {
+                        let _ = tx_cb.send(InputEvent::ToggleEnabled);
                     }
                 }
                 CGEventType::MouseMoved
@@ -92,15 +114,12 @@ fn run_tap(tx: Sender<InputEvent>, shared: SharedInput) -> Result<(), HookStatus
                         y: loc.y,
                     });
                 }
-                CGEventType::TapDisabledByTimeout | CGEventType::TapDisabledByUserInput => {
-                    log::warn!("CGEventTap disabled by system ({ev_type:?}); re-enable required");
-                }
                 _ => {}
             }
             Some(event.clone())
         },
     )
-    .map_err(|_| HookStatus::Failed("CGEventTap::new failed (permission or session)"))?;
+    .map_err(|_| HookStatus::Failed("CGEventTap::new failed"))?;
 
     unsafe {
         let source = tap
@@ -110,9 +129,10 @@ fn run_tap(tx: Sender<InputEvent>, shared: SharedInput) -> Result<(), HookStatus
         CFRunLoop::get_current().add_source(&source, kCFRunLoopCommonModes);
         tap.enable();
     }
-
     let _ = tx.send(InputEvent::Status(HookStatus::Running));
-    log::info!("CGEventTap running (ListenOnly; Option=ping, Control=emote)");
     CFRunLoop::run_current();
     Ok(())
 }
+
+#[allow(dead_code)]
+fn _cfg_type(_: &InputConfig) {}

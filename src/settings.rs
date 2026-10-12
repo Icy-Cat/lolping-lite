@@ -32,11 +32,13 @@ pub struct Settings {
     pub tag_color: u8,
     pub allow_internet: bool,
     pub enabled: bool,
-    /// Ping wheel slot ids (texture keys), length 8.
+    /// Ping wheel slot ids (PINGS[].id), length 8.
     pub wheel: Vec<String>,
-    /// Emote wheel names (first 8 catalog names by default).
+    /// Emote wheel names, length 8.
     pub emote_wheel: Vec<String>,
     pub auto_update_check: bool,
+    /// Pause chord: Ctrl+Alt+P (documented; mods fixed for now).
+    pub pause_hotkey_label: String,
 }
 
 impl Default for Settings {
@@ -58,7 +60,8 @@ impl Default for Settings {
             enabled: true,
             wheel: PINGS.iter().map(|p| p.id.to_string()).collect(),
             emote_wheel: Vec::new(),
-            auto_update_check: false, // updater deferred
+            auto_update_check: false,
+            pause_hotkey_label: "Ctrl+Alt+P".into(),
         }
     }
 }
@@ -91,26 +94,43 @@ impl Settings {
     }
 
     pub fn ensure_emote_wheel(&mut self, names: &[String]) {
-        if self.emote_wheel.len() >= WHEEL_SLOTS {
+        if self.emote_wheel.len() > WHEEL_SLOTS {
             self.emote_wheel.truncate(WHEEL_SLOTS);
-            return;
         }
-        for n in names.iter().take(WHEEL_SLOTS) {
-            if !self.emote_wheel.contains(n) {
-                self.emote_wheel.push(n.clone());
-            }
+        for n in names.iter() {
             if self.emote_wheel.len() >= WHEEL_SLOTS {
                 break;
+            }
+            if !self.emote_wheel.contains(n) {
+                self.emote_wheel.push(n.clone());
             }
         }
         while self.emote_wheel.len() < WHEEL_SLOTS {
             self.emote_wheel.push(String::new());
         }
     }
+
+    pub fn ensure_ping_wheel(&mut self) {
+        if self.wheel.len() != WHEEL_SLOTS {
+            self.wheel = PINGS.iter().map(|p| p.id.to_string()).collect();
+        }
+        for id in &mut self.wheel {
+            if !PINGS.iter().any(|p| p.id == id.as_str()) {
+                *id = PINGS[0].id.to_string();
+            }
+        }
+    }
+
+    pub fn ping_def_at(&self, slot: usize) -> &'static crate::wheel::PingDef {
+        let id = self.wheel.get(slot).map(|s| s.as_str()).unwrap_or("omw");
+        PINGS
+            .iter()
+            .find(|p| p.id == id)
+            .unwrap_or(&PINGS[0])
+    }
 }
 
 fn dirs_next_config() -> Option<PathBuf> {
-    // Avoid extra deps: XDG / macOS Application Support / Windows APPDATA.
     if let Ok(xdg) = std::env::var("XDG_CONFIG_HOME") {
         return Some(PathBuf::from(xdg));
     }
@@ -141,5 +161,16 @@ mod tests {
         let back: Settings = serde_json::from_str(&j).unwrap();
         assert_eq!(back.ping_size_px, 110);
         assert_eq!(back.wheel.len(), 8);
+    }
+
+    #[test]
+    fn input_config_from_settings() {
+        let mut s = Settings::default();
+        s.trigger = TriggerKey::Shift;
+        s.emote_trigger = TriggerKey::Win;
+        s.enabled = false;
+        let c = crate::input::InputConfig::from_settings(&s);
+        assert_eq!(c.ping_trigger, TriggerKey::Shift);
+        assert!(!c.enabled);
     }
 }

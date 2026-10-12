@@ -1,29 +1,6 @@
-//! Global input hooks for hold+drag gestures.
-//!
-//! ## Crate evaluation (this milestone)
-//!
-//! | Option | Fit for Option/Ctrl **hold** + mouse drag | Notes |
-//! |--------|-------------------------------------------|-------|
-//! | **core-graphics `CGEventTap`** (chosen on macOS) | Excellent | Flags + mouse in one tap; explicit permission errors |
-//! | `rdev` | OK | Silent no-events if Accessibility denied; Sonoma thread caveats |
-//! | `carbonhotkey` / `global-hotkey` | Poor | Chord register, not continuous modifier hold + move |
-//! | `keytap` | Partial | Keyboard-only (no mouse) in v1 |
-//!
-//! ## Swallow policy (conservative)
-//!
-//! macOS tap uses `CGEventTapOptions::ListenOnly` — we **never** swallow or
-//! rewrite events this milestone. Option/Control still reach other apps.
-//! Later we may switch to an active filter only while a gesture is armed.
-//!
-//! ## Platforms
-//!
-//! - macOS: `macos` module (CGEventTap + Accessibility check)
-//! - Windows: stub (`windows`)
-//! - others: stub reporting unsupported
+//! Global input hooks — settings-driven triggers + pause chord.
 
-use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
-use std::sync::{Arc, Mutex};
-
+mod config;
 #[cfg(target_os = "macos")]
 mod macos;
 #[cfg(target_os = "windows")]
@@ -31,8 +8,13 @@ mod windows;
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
 mod stub;
 
+pub use config::{new_shared, update_config, InputConfig, SharedConfig};
+
+use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
+use std::sync::{Arc, Mutex};
+
 #[derive(Debug, Clone, Copy, PartialEq)]
-#[allow(dead_code)] // constructed on macOS; matched on all targets in the UI
+#[allow(dead_code)]
 pub enum HookStatus {
     Starting,
     Running,
@@ -42,14 +24,13 @@ pub enum HookStatus {
 }
 
 #[derive(Debug, Clone, Copy)]
-#[allow(dead_code)] // constructed on macOS hook thread
+#[allow(dead_code)]
 pub enum InputEvent {
-    /// Option / Alt style modifier for ping wheel.
     PingModifier { down: bool },
-    /// Control modifier for emote wheel.
     EmoteModifier { down: bool },
     MouseMove { x: f64, y: f64 },
-    /// Hook thread status (permission etc.).
+    /// Pause hotkey toggled enabled state.
+    ToggleEnabled,
     Status(HookStatus),
 }
 
@@ -62,7 +43,6 @@ pub struct GestureSnapshot {
     pub move_count: u64,
 }
 
-/// Shared live state updated by the hook thread; UI reads each frame.
 #[derive(Clone, Default)]
 pub struct SharedInput {
     inner: Arc<Mutex<GestureSnapshot>>,
@@ -82,29 +62,47 @@ impl SharedInput {
 
 pub struct InputHub {
     pub shared: SharedInput,
+    pub config: SharedConfig,
     rx: Receiver<InputEvent>,
     pub status: HookStatus,
     log_lines: Vec<String>,
+    /// Mirror of settings.enabled for UI.
+    pub enabled: bool,
 }
 
 impl InputHub {
-    pub fn start() -> Self {
+    pub fn start(cfg: InputConfig) -> Self {
         let (tx, rx) = mpsc::channel();
         let shared = SharedInput::default();
-        let status = spawn_platform_hook(tx.clone(), shared.clone());
+        let config = new_shared(cfg.clone());
+        let status = spawn_platform_hook(tx.clone(), shared.clone(), config.clone());
         let _ = tx.send(InputEvent::Status(status));
         Self {
             shared,
+            config,
             rx,
             status,
             log_lines: Vec::new(),
+            enabled: cfg.enabled,
         }
     }
 
-    pub fn poll(&mut self) {
+    pub fn apply_settings(&self, s: &crate::settings::Settings) {
+        update_config(&self.config, |c| {
+            *c = InputConfig::from_settings(s);
+        });
+    }
+
+    pub fn poll(&mut self) -> Vec<InputEvent> {
+        let mut extras = Vec::new();
         loop {
             match self.rx.try_recv() {
-                Ok(ev) => self.handle(ev),
+                Ok(ev) => {
+                    self.handle(&ev);
+                    if matches!(ev, InputEvent::ToggleEnabled) {
+                        extras.push(ev);
+                    }
+                }
                 Err(TryRecvError::Empty) => break,
                 Err(TryRecvError::Disconnected) => {
                     self.status = HookStatus::Failed("input channel disconnected");
@@ -112,10 +110,11 @@ impl InputHub {
                 }
             }
         }
+        extras
     }
 
-    fn handle(&mut self, ev: InputEvent) {
-        match ev {
+    fn handle(&mut self, ev: &InputEvent) {
+        match *ev {
             InputEvent::Status(s) => {
                 self.status = s;
                 self.push_log(format!("hook status: {s:?}"));
@@ -135,6 +134,16 @@ impl InputHub {
                     g.move_count = g.move_count.saturating_add(1);
                 });
             }
+            InputEvent::ToggleEnabled => {
+                update_config(&self.config, |c| {
+                    c.enabled = !c.enabled;
+                    self.enabled = c.enabled;
+                });
+                self.push_log(format!(
+                    "pause hotkey → enabled={}",
+                    self.enabled
+                ));
+            }
         }
     }
 
@@ -152,17 +161,54 @@ impl InputHub {
     }
 }
 
-fn spawn_platform_hook(tx: Sender<InputEvent>, shared: SharedInput) -> HookStatus {
+fn spawn_platform_hook(
+    tx: Sender<InputEvent>,
+    shared: SharedInput,
+    config: SharedConfig,
+) -> HookStatus {
     #[cfg(target_os = "macos")]
     {
-        macos::spawn(tx, shared)
+        macos::spawn(tx, shared, config)
     }
     #[cfg(target_os = "windows")]
     {
-        windows::spawn(tx, shared)
+        windows::spawn(tx, shared, config)
     }
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     {
-        stub::spawn(tx, shared)
+        stub::spawn(tx, shared, config)
+    }
+}
+
+/// Pure helper for tests: map settings triggers.
+pub fn map_triggers_for_test(
+    cfg: &InputConfig,
+    alt: bool,
+    ctrl: bool,
+    shift: bool,
+    meta: bool,
+) -> (bool, bool) {
+    cfg.map_modifiers(alt, ctrl, shift, meta)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::settings::TriggerKey;
+
+    #[test]
+    fn settings_map_swap_triggers() {
+        let mut cfg = InputConfig::default();
+        cfg.ping_trigger = TriggerKey::Ctrl;
+        cfg.emote_trigger = TriggerKey::Alt;
+        assert_eq!(cfg.map_modifiers(true, false, false, false), (false, true));
+        assert_eq!(cfg.map_modifiers(false, true, false, false), (true, false));
+    }
+
+    #[test]
+    fn pause_chord() {
+        let cfg = InputConfig::default();
+        assert!(cfg.pause_chord_matches(true, true, false, false));
+        assert!(!cfg.pause_chord_matches(true, false, false, false));
     }
 }

@@ -1,4 +1,4 @@
-//! Room sync: codes, AES-GCM crypto, LAN UDP, Nostr stub.
+//! Room sync: codes, AES-GCM crypto, LAN UDP, Nostr relays.
 
 mod code;
 mod crypto;
@@ -9,7 +9,9 @@ mod protocol;
 pub use code::{format_room_code, make_room_code, parse_room_code, ParsedRoomCode};
 pub use crypto::{derive_room_keys, open_packet, seal_packet, RoomKeys, MAX_PACKET};
 pub use lan::{LanTransport, LAN_PORT};
-pub use nostr::NostrTransport;
+pub use nostr::{
+    parse_relay_event_content, req_message, NostrTransport, RELAYS, ROOM_EVENT_KIND,
+};
 pub use protocol::{
     decode_message, encode_message, EmoteMsg, MemberStatus, PingMsg, PresenceMsg, RoomMessage,
     PROTOCOL_VERSION,
@@ -64,6 +66,8 @@ pub struct RoomHub {
     rx: Receiver<RoomEvent>,
     members: Arc<Mutex<HashMap<String, RoomMember>>>,
     lan: Option<LanTransport>,
+    nostr: Option<NostrTransport>,
+    allow_internet: bool,
     name: String,
     color: u8,
 }
@@ -82,6 +86,8 @@ impl RoomHub {
             rx,
             members: Arc::new(Mutex::new(HashMap::new())),
             lan: None,
+            nostr: None,
+            allow_internet: settings.allow_internet,
             name: settings.display_name.clone(),
             color: settings.tag_color,
         }
@@ -161,6 +167,30 @@ impl RoomHub {
             }
         })?;
         self.lan = Some(lan);
+        if self.allow_internet {
+            let tx_n = self.tx.clone();
+            let keys_n = keys.clone();
+            let peer_self = self.peer_id.clone();
+            let members = self.members.clone();
+            match NostrTransport::start(&keys, move |packet| {
+                if let Some(plain) = open_packet(&keys_n.msg_key, &packet) {
+                    if let Some(msg) = decode_message(&plain) {
+                        handle_incoming(msg, &peer_self, &members, &tx_n, "nostr".into());
+                    }
+                }
+            }) {
+                Ok(n) => {
+                    let _ = self.tx.send(RoomEvent::Status(format!(
+                        "nostr topic {}…",
+                        &n.topic[..16.min(n.topic.len())]
+                    )));
+                    self.nostr = Some(n);
+                }
+                Err(e) => {
+                    let _ = self.tx.send(RoomEvent::Status(format!("nostr start failed: {e:#}")));
+                }
+            }
+        }
         self.broadcast_presence(MemberStatus::On);
         let _ = self.tx.send(RoomEvent::Status(format!(
             "joined {} (LAN :{LAN_PORT})",
@@ -175,6 +205,9 @@ impl RoomHub {
         }
         if let Some(lan) = self.lan.take() {
             lan.stop();
+        }
+        if let Some(n) = self.nostr.take() {
+            n.stop();
         }
         self.keys = None;
         self.code = None;
@@ -195,10 +228,14 @@ impl RoomHub {
 
     fn seal_send(&self, msg: &RoomMessage) {
         let Some(keys) = &self.keys else { return };
-        let Some(lan) = &self.lan else { return };
         let plain = encode_message(msg);
         if let Ok(packet) = seal_packet(&keys.msg_key, &plain) {
-            lan.broadcast(&packet);
+            if let Some(lan) = &self.lan {
+                lan.broadcast(&packet);
+            }
+            if let Some(n) = &self.nostr {
+                n.publish(&packet);
+            }
         }
     }
 
