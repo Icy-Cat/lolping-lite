@@ -37,6 +37,10 @@ pub struct EmoteAnimation {
 pub struct AssetCatalog {
     root: PathBuf,
     store: Option<Arc<AssetStore>>,
+    /// v2 store (WebM/VP9 emotes) if this build can decode them.
+    v2: Option<Arc<AssetStore>>,
+    /// Emotes whose v2 WebM failed to decode — use v1 WebP for them.
+    v2_bad: std::collections::HashSet<String>,
     emotes: Vec<EmoteEntry>,
     textures: Vec<PathBuf>,
     sounds: Vec<PathBuf>,
@@ -49,7 +53,57 @@ impl AssetCatalog {
     pub fn discover() -> Self {
         let store = AssetStore::global().clone();
         store.refresh_manifest_bg(false);
-        Self::with_store(store)
+        let v2 = AssetStore::global_v2().cloned();
+        if let Some(d) = v2.as_ref().and_then(|v| v.cache_dir.clone()) {
+            store.extra_dirs.lock().unwrap().push(d);
+        }
+        let mut c = Self::with_store(store);
+        c.v2 = v2;
+        c
+    }
+
+    pub fn v2_store(&self) -> Option<&Arc<AssetStore>> {
+        self.v2.as_ref()
+    }
+
+    pub fn with_stores(store: Arc<AssetStore>, v2: Option<Arc<AssetStore>>) -> Self {
+        let mut c = Self::with_store(store);
+        c.v2 = v2;
+        c
+    }
+
+    pub fn v2_enabled(&self) -> bool {
+        self.v2.is_some()
+    }
+
+    /// Background-prefetch what's needed to animate these emotes (v2 WebM if enabled, else WebP).
+    pub fn prefetch_animations(&self, names: &[String]) {
+        match &self.v2 {
+            Some(v2) => v2.request_many(names.iter().map(|n| format!("emotes/{n}.webm")).collect::<Vec<_>>().iter().map(|s| s.as_str())),
+            None => self.prefetch(&names.iter().map(|n| format!("emotes/{n}.webp")).collect::<Vec<_>>()),
+        }
+    }
+
+    /// Pick the animation source for an emote without blocking.
+    /// Ok(Some(path, is_webm)) ready; Ok(None) downloading.
+    fn anim_source(&self, entry: &EmoteEntry) -> Option<(PathBuf, bool)> {
+        if let Some(v2) = self.v2.as_ref().filter(|_| !self.v2_bad.contains(&entry.name)) {
+            let rel = format!("emotes/{}.webm", entry.name);
+            if let Some(p) = v2.lookup(&rel) {
+                return Some((p, true));
+            }
+            // Local v1 bundle present: use it now, upgrade to v2 in the background.
+            if let Some(p) = self.store.as_ref().and_then(|s| s.local_root.as_ref()).map(|r| r.join(&entry.webp)).filter(|p| p.is_file()) {
+                v2.request(&rel);
+                return Some((p, false));
+            }
+            if !v2.has_failed(&rel) {
+                v2.request(&rel);
+                return None;
+            }
+            // v2 unavailable → fall through to v1.
+        }
+        self.resolve(&entry.webp).map(|p| (p, false))
     }
 
     pub fn with_store(store: Arc<AssetStore>) -> Self {
@@ -183,10 +237,22 @@ impl AssetCatalog {
             return Ok(self.cached_anim.as_ref().unwrap());
         }
 
-        let path = self
-            .resolve(&entry.webp)
-            .ok_or_else(|| anyhow!("{} not ready (downloading)", entry.webp))?;
-        let anim = decode_webp_animation(&path, &entry.name)?;
+        let (path, is_webm) = self
+            .anim_source(&entry)
+            .ok_or_else(|| anyhow!("{} not ready (downloading)", entry.name))?;
+        let anim = if is_webm {
+            match decode_webm_animation(&path, &entry.name) {
+                Ok(a) => a,
+                Err(e) => {
+                    log::warn!("v2 webm '{}' failed ({e:#}); falling back to v1 webp", entry.name);
+                    self.v2_bad.insert(entry.name.clone());
+                    let p = self.resolve(&entry.webp).ok_or_else(|| anyhow!("{} downloading", entry.webp))?;
+                    decode_webp_animation(&p, &entry.name)?
+                }
+            }
+        } else {
+            decode_webp_animation(&path, &entry.name)?
+        };
         log::info!(
             "decoded emote '{}' animation: {} frames (on-demand, single-slot cache)",
             anim.name,
@@ -202,6 +268,16 @@ impl AssetCatalog {
             .filter(|a| a.name == name)
             .cloned()
     }
+}
+
+pub fn decode_webm_animation(path: &Path, name: &str) -> Result<EmoteAnimation> {
+    let bytes = std::fs::read(path).with_context(|| format!("read {}", path.display()))?;
+    let f = crate::webm::parse(&bytes)?;
+    const MAX_FRAMES: usize = 120;
+    let frames = crate::webm::decode_rgba_frames(&f, MAX_FRAMES)?;
+    let mut delays_ms = crate::webm::frame_delays(&f);
+    delays_ms.truncate(frames.len());
+    Ok(EmoteAnimation { name: name.to_string(), frames, delays_ms })
 }
 
 fn decode_webp_animation(path: &Path, name: &str) -> Result<EmoteAnimation> {

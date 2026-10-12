@@ -6,6 +6,7 @@ description = "Ultra-light League of Legends-style desktop ping / emote wheel (R
 license = "MIT"
 repository = "https://github.com/Icy-Cat/lolping-lite"
 readme = "README.md"
+build = "build.rs"
 keywords = ["lol", "ping", "overlay", "egui"]
 categories = ["gui"]
 
@@ -40,6 +41,9 @@ native-tls = "0.2"
 ureq = { version = "2", default-features = false, features = ["native-tls"] }
 zip = { version = "0.6", default-features = false, features = ["deflate"] }
 k256 = { version = "0.13", features = ["schnorr"] }
+
+[build-dependencies]
+cc = "1"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 core-foundation = "0.10"

@@ -99,6 +99,19 @@ pub fn base_url() -> String {
         .to_string()
 }
 
+pub fn v2_base_url() -> String {
+    if let Ok(b) = std::env::var("LOLPING_ASSET_BASE_V2") {
+        if !b.trim().is_empty() {
+            return b.trim_end_matches('/').to_string();
+        }
+    }
+    let b = base_url();
+    match b.strip_suffix("/v1") {
+        Some(root) => format!("{root}/v2"),
+        None => format!("{b}/../v2"),
+    }
+}
+
 /// Platform cache root without pulling in `dirs`.
 pub fn platform_cache_root() -> Option<PathBuf> {
     if let Ok(p) = std::env::var("LOLPING_CACHE_DIR") {
@@ -239,6 +252,9 @@ pub struct AssetStore {
     pub bulk_state: Mutex<BulkState>,
     /// Bumps whenever a new file lands in the cache (UI can poll this).
     pub generation: AtomicU64,
+    /// Extra read-only cache dirs checked after our own (e.g. the v2 cache, whose
+    /// png/ogg/wav are byte-identical to v1). Size-checked against our manifest.
+    pub extra_dirs: Mutex<Vec<PathBuf>>,
 }
 
 impl AssetStore {
@@ -255,6 +271,7 @@ impl AssetStore {
             bulk_total: AtomicU64::new(0),
             bulk_state: Mutex::default(),
             generation: AtomicU64::new(0),
+            extra_dirs: Mutex::default(),
         };
         if let Some(m) = s.cached_manifest_path().and_then(|p| std::fs::read(p).ok()) {
             if let Ok(m) = Manifest::parse(&m) {
@@ -273,6 +290,36 @@ impl AssetStore {
                 base_url(),
             ))
         })
+    }
+
+    /// v2 store (VP9 WebM emotes). `None` when this build has no VP9 decoder or
+    /// `LOLPING_NO_V2=1`. Base: `$LOLPING_ASSET_BASE_V2`, else the v1 base with `/v1` → `/v2`.
+    pub fn global_v2() -> Option<&'static Arc<AssetStore>> {
+        static G: OnceLock<Option<Arc<AssetStore>>> = OnceLock::new();
+        G.get_or_init(|| {
+            if !crate::webm::VP9_AVAILABLE
+                || matches!(std::env::var("LOLPING_NO_V2").as_deref(), Ok("1") | Ok("true"))
+            {
+                return None;
+            }
+            let s = Arc::new(AssetStore::new(
+                std::env::var_os("LOLPING_V2_LOCAL").map(PathBuf::from),
+                platform_cache_root().map(|r| r.join("lolping-lite").join("v2")),
+                v2_base_url(),
+            ));
+            s.refresh_manifest_bg(false);
+            Some(s)
+        })
+        .as_ref()
+    }
+
+    /// True if the last download attempt for `rel` failed (within the backoff window).
+    pub fn has_failed(&self, rel: &str) -> bool {
+        self.failed
+            .lock()
+            .unwrap()
+            .get(rel)
+            .is_some_and(|t| t.elapsed().unwrap_or_default() < Duration::from_secs(30))
     }
 
     fn cached_manifest_path(&self) -> Option<PathBuf> {
@@ -339,19 +386,18 @@ impl AssetStore {
                 return Some(p);
             }
         }
+        let rel = safe_rel(rel).ok()?;
+        let want = self.manifest().and_then(|m| m.get(rel).map(|f| f.size));
+        let ok = |p: &Path| {
+            // Cheap integrity check: size must match the manifest when known.
+            p.is_file() && want.is_none_or(|n| std::fs::metadata(p).map(|m| m.len()).ok() == Some(n))
+        };
         let p = self.cache_path(rel)?;
-        if !p.is_file() {
-            return None;
+        if ok(&p) {
+            return Some(p);
         }
-        // Cheap integrity check: size must match the manifest when known.
-        if let Some(m) = self.manifest() {
-            if let Some(f) = m.get(rel) {
-                if std::fs::metadata(&p).map(|m| m.len()).ok() != Some(f.size) {
-                    return None;
-                }
-            }
-        }
-        Some(p)
+        let extra = self.extra_dirs.lock().unwrap().clone();
+        extra.into_iter().map(|d| d.join(rel)).find(|p| want.is_some() && ok(p))
     }
 
     /// Non-blocking resolve: returns a path if available, otherwise schedules a

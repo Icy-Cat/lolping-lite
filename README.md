@@ -56,6 +56,29 @@ Env overrides: `LOLPING_ASSET_BASE` (CDN base URL), `LOLPING_CACHE_DIR` (cache r
 
 Publishing new assets: `set -a; . ~/.config/lolping/r2.env; set +a; python3 scripts/upload-assets.py` (credentials from env only).
 
+### v2 assets: VP9 WebM emotes
+
+`https://lolping-assets.icy-cat.com/v2/` has the same layout as v1, but the 44 animated emotes are
+transparent VP9 WebM (`emotes/<name>.webm`, yuva420p, CRF 10, original 320×320, same frame count,
+per-frame timing kept with VFR timestamps; the last frame's hold is in the stream tag `LAST_FRAME_MS`).
+PNG/OGG/WAV are byte-identical to v1. Total size: v1 55.7 MB → v2 35.1 MB (emotes 50.0 → 29.4 MB),
+zip 52 → 33.9 MB. Mean composited PSNR vs the WebP originals: 44.7 dB (min 41.6), alpha 53.9 dB.
+
+The app prefers v2 when it was built with the in-app VP9 decoder (static, decoder-only libvpx through a
+tiny C shim + a ~250-line WebM demuxer in `src/webm.rs`). If a WebM is missing, fails to download, or
+fails to decode, it falls back to the v1 WebP for that emote. Builds without libvpx compile fine and use v1 only.
+
+```bash
+scripts/build-libvpx.sh            # → vendor/libvpx (needs make, cc, nasm on x86)
+cargo build --release              # build.rs links it automatically (LIBVPX_DIR to override, LOLPING_NO_VP9=1 to skip)
+scripts/build-v2-assets.sh         # assets/original → dist/assets-v2 (+ manifest.json, zip); originals untouched
+scripts/verify-v2-assets.py        # frame counts, alpha, composited PSNR
+R2_PREFIX=v2 python3 scripts/upload-assets.py dist/assets-v2   # with R2_* env from ~/.config/lolping/r2.env
+```
+
+Runtime env: `LOLPING_NO_V2=1` (force v1), `LOLPING_ASSET_BASE_V2` (override v2 base; default = v1 base with `/v1`→`/v2`).
+Settings → Download all fetches the v2 zip when VP9 is available (its png/ogg/wav also serve v1 lookups).
+
 ## Layout
 
 ```

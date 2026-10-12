@@ -6,3 +6,4 @@ dist/
 release/
 # Optional derived assets (never replace originals)
 assets/derived/
+/vendor/

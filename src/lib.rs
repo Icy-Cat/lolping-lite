@@ -13,4 +13,5 @@ pub mod remote;
 pub mod room;
 pub mod settings;
 pub mod simulate;
+pub mod webm;
 pub mod wheel;

@@ -187,8 +187,10 @@ impl LolPingApp {
     /// Background prefetch of everything the current wheels need.
     fn prefetch_wheels(&self) {
         let mut rels: Vec<String> = Vec::new();
-        for n in self.emote_slot_names.iter().filter(|n| !n.is_empty()) {
-            for ext in ["png", "webp", "ogg"] {
+        let names: Vec<String> = self.emote_slot_names.iter().filter(|n| !n.is_empty()).cloned().collect();
+        self.catalog.prefetch_animations(&names);
+        for n in &names {
+            for ext in ["png", "ogg"] {
                 rels.push(format!("emotes/{n}.{ext}"));
             }
         }
@@ -750,16 +752,22 @@ impl LolPingApp {
         use crate::remote::BulkState;
         use std::sync::atomic::Ordering;
         ui.strong("Assets");
-        let Some(store) = self.catalog.store().cloned() else { return };
-        match &store.local_root {
+        let Some(v1) = self.catalog.store().cloned() else { return };
+        // With VP9 available, "download all" pulls the smaller v2 set (WebM emotes);
+        // its png/ogg/wav are shared with v1 lookups via extra_dirs.
+        let v2 = self.catalog.v2_store().cloned();
+        let store = v2.clone().unwrap_or_else(|| v1.clone());
+        ui.weak(if v2.is_some() { "Emotes: v2 WebM (VP9+alpha), v1 WebP fallback" } else { "Emotes: v1 WebP (built without VP9)" });
+        match &v1.local_root {
             Some(p) => ui.weak(format!("Local bundle: {}", p.display())),
             None => ui.weak(format!("Source: {}", store.base)),
         };
-        if let Some(d) = &store.cache_dir {
+        for d in [&v1.cache_dir, &v2.as_ref().and_then(|v| v.cache_dir.clone())].into_iter().flatten() {
             ui.weak(format!("Cache: {}", d.display()));
         }
         let mb = |b: u64| b as f64 / 1_048_576.0;
-        ui.label(format!("Cache size: {:.1} MB", mb(store.cache_size())));
+        let size = v1.cache_size() + v2.as_ref().map(|v| v.cache_size()).unwrap_or(0);
+        ui.label(format!("Cache size: {:.1} MB", mb(size)));
         let state = store.bulk_state.lock().unwrap().clone();
         ui.horizontal(|ui| {
             let running = matches!(state, BulkState::Running);
@@ -767,7 +775,8 @@ impl LolPingApp {
                 store.download_all_bg();
             }
             if ui.add_enabled(!running, egui::Button::new("Clear cache")).clicked() {
-                match store.clear_cache() {
+                let r = v1.clear_cache().and_then(|_| v2.as_ref().map(|v| v.clear_cache()).unwrap_or(Ok(())));
+                match r {
                     Ok(()) => self.log("asset cache cleared"),
                     Err(e) => self.log(format!("clear cache failed: {e:#}")),
                 }

@@ -2395,6 +2395,7 @@ dependencies = [
  "aes-gcm",
  "anyhow",
  "base64",
+ "cc",
  "clap",
  "core-foundation 0.10.1",
  "core-graphics 0.24.0",
