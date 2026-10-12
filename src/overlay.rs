@@ -4,21 +4,15 @@
 //!
 //! | State            | UI chrome        | Mouse passthrough | Typical trigger                         |
 //! |------------------|------------------|-------------------|-----------------------------------------|
-//! | `Idle`           | beacon only      | **on**            | no gesture, debug UI closed             |
-//! | `PingGesture`    | ping HUD         | **off**           | Option held (macOS)                     |
-//! | `EmoteGesture`   | emote HUD        | **off**           | Control held (macOS)                    |
-//! | `DebugUi`        | full debug panel | **off**           | pinned, or Option+Control chord         |
+//! | `Idle`           | beacon / FX only | **on**            | no gesture, debug UI closed             |
+//! | `PingGesture`    | ping wheel       | **off**           | Option held (macOS) / Alt (local)       |
+//! | `EmoteGesture`   | emote wheel      | **off**           | Control held / Ctrl (local)             |
+//! | `DebugUi`        | debug panel      | **off**           | pinned, or Option+Control chord         |
 //!
-//! Rule (product): **wheel / debug UI visible → passthrough off**;
-//! **hidden / idle → passthrough on** so clicks reach apps underneath.
+//! Rule: **wheel / debug / active FX needing hits → passthrough off**;
+//! **idle → passthrough on**. Gestures are **not** blocked by a pinned debug panel.
 //!
-//! egui 0.32 exposes `ViewportBuilder::with_mouse_passthrough` and
-//! `ViewportCommand::MousePassthrough`. On platforms where
-//! `window.set_cursor_hittest` fails, egui-winit logs the error and we keep
-//! trying each transition (see `apply`).
-//!
-//! Escape hatch while click-through: hold **Option+Control** together to
-//! re-pin the debug UI (works because CGEventTap still sees flags).
+//! Escape hatch while click-through: hold **Option+Control** to re-pin debug.
 
 use eframe::egui::{self, ViewportCommand};
 
@@ -31,10 +25,6 @@ pub enum OverlayState {
 }
 
 impl OverlayState {
-    pub fn ui_visible(self) -> bool {
-        !matches!(self, Self::Idle)
-    }
-
     pub fn mouse_passthrough(self) -> bool {
         matches!(self, Self::Idle)
     }
@@ -58,7 +48,6 @@ pub struct OverlayController {
 
 impl Default for OverlayController {
     fn default() -> Self {
-        // Start interactive so the user can see status / grant Accessibility.
         Self {
             state: OverlayState::DebugUi,
             applied_passthrough: None,
@@ -78,29 +67,35 @@ impl OverlayController {
 
     pub fn set_debug_pinned(&mut self, pinned: bool) {
         self.debug_pinned = pinned;
-        if pinned {
-            self.state = OverlayState::DebugUi;
-        } else if matches!(self.state, OverlayState::DebugUi) {
-            self.state = OverlayState::Idle;
-        }
+        self.recompute(None, false);
     }
 
-    /// Modifier / gesture updates from the input hook.
-    pub fn on_gesture(&mut self, ping: bool, emote: bool) {
-        // Chord: both modifiers → re-open debug even if click-through.
+    /// `gesture` overrides idle/debug for passthrough; chord pins debug.
+    pub fn sync(
+        &mut self,
+        ping: bool,
+        emote: bool,
+        gesture: Option<OverlayState>,
+        fx_blocking: bool,
+    ) {
         if ping && emote {
             self.debug_pinned = true;
-            self.state = OverlayState::DebugUi;
-            return;
         }
-        if self.debug_pinned {
-            self.state = OverlayState::DebugUi;
-            return;
-        }
-        self.state = if ping {
-            OverlayState::PingGesture
-        } else if emote {
-            OverlayState::EmoteGesture
+        self.recompute(gesture, fx_blocking);
+    }
+
+    fn recompute(&mut self, gesture: Option<OverlayState>, fx_blocking: bool) {
+        self.state = if let Some(g) = gesture {
+            g
+        } else if self.debug_pinned || fx_blocking {
+            // Keep passthrough off while debug is up. FX alone does not need
+            // hits — they paint under passthrough — so fx_blocking reserved.
+            let _ = fx_blocking;
+            if self.debug_pinned {
+                OverlayState::DebugUi
+            } else {
+                OverlayState::Idle
+            }
         } else {
             OverlayState::Idle
         };

@@ -2,8 +2,12 @@
 
 mod app;
 mod assets;
+mod audio;
+mod fx;
+mod gesture;
 mod input;
 mod overlay;
+mod wheel;
 
 use anyhow::Result;
 use eframe::egui;
@@ -13,20 +17,15 @@ fn main() -> Result<()> {
 
     let native_options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([480.0, 420.0])
+            .with_inner_size([1100.0, 720.0])
             .with_title("lolPing-lite")
             .with_transparent(true)
             .with_decorations(true)
             .with_always_on_top()
-            // Start click-through; OverlayController toggles at runtime.
             .with_mouse_passthrough(true)
             .with_resizable(true),
         ..Default::default()
     };
-
-    // Fallback note: if the compositor rejects transparency, egui still runs with
-    // an opaque clear — clear_color alpha 0 is best-effort. Passthrough uses
-    // winit `set_cursor_hittest`; failures are logged inside egui-winit.
 
     eframe::run_native(
         "lolPing-lite",

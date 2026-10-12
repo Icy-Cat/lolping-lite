@@ -8,7 +8,7 @@ first (Windows architecture reserved).
 
 ## Status
 
-Milestone 1–2 in progress: transparent always-on-top window, runtime mouse
+Milestone 3 (wheels) landed: transparent always-on-top window, runtime mouse
 passthrough state machine, macOS `CGEventTap` skeleton, on-demand WebP first-frame
 load. Full wheels / audio / rooms are not done — see [docs/PLAN.md](docs/PLAN.md).
 
@@ -35,6 +35,13 @@ load. Full wheels / audio / rooms are not done — see [docs/PLAN.md](docs/PLAN.
 
 Files under `assets/original/` are © Riot Games. See [ASSETS.md](ASSETS.md).
 Code is MIT; assets are not open-sourced.
+
+## Wheels (Milestone 3)
+
+- Hold **⌥ Option** (or **Alt** in-window) and drag → 8-slice **ping** wheel; release on a slice to place.
+- Hold **⌃ Control** (or **Ctrl**) → **emote** wheel; release plays that emote's animated WebP (decoded on demand, one emote cached).
+- Release in the center or press **Esc** to cancel.
+- Audio: stub (logs path); rodio blocked on rustc 1.85 / encoding_rs.
 
 ## Build
 
