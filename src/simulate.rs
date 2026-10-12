@@ -140,6 +140,7 @@ pub fn run_simulate() -> i32 {
     let plain = open_packet(&keys.msg_key, &sealed).unwrap();
     expect(plain == emote_msg, "remote emote envelope", &mut failed);
 
+    upstream_sync_checks(&mut failed);
     online_asset_check(&mut failed);
 
     if failed == 0 {
@@ -342,4 +343,39 @@ fn composited_psnr(a: &[image::RgbaImage], b: &[image::RgbaImage]) -> f64 {
         }
     }
     if se == 0.0 { 99.0 } else { 10.0 * (255f64.powi(2) / (se / n)).log10() }
+}
+
+/// Upstream ports (sync up to f24a51e): chord passthrough, fullscreen pause, inject queue.
+fn upstream_sync_checks(failed: &mut u32) {
+    use crate::input::decision::{classify_vk, covers_monitor, Btn, Inject, InjectQueue, Rect};
+    let c = Pos2::new(200.0, 200.0);
+    // Alt+Tab: wheel dropped, nothing placed, gestures again after release
+    let mut g = GestureSession::default();
+    let _ = g.tick(true, false, c, false);
+    expect(g.foreign_key(classify_vk(0x09)) && !g.wheel_active(), "alt+tab drops wheel", failed);
+    let up = Pos2::new(200.0, 200.0 - WHEEL_RADIUS * 0.7);
+    let _ = g.tick(true, false, up, false);
+    expect(matches!(g.tick(false, false, up, false), GestureOutcome::None), "alt+tab places nothing", failed);
+    let _ = g.tick(true, false, c, false);
+    expect(g.wheel_active(), "gestures after chord", failed);
+    // fullscreen pause
+    let mut g = GestureSession::default();
+    let _ = g.tick_gated(true, false, c, false, &mut || true);
+    expect(!g.wheel_active() && g.game_paused, "fullscreen pauses wheel", failed);
+    let mon = Rect { left: 0, top: 0, right: 1920, bottom: 1080 };
+    let work = Rect { bottom: 1040, ..mon };
+    let cs2 = Rect { left: -8, top: -8, right: 1928, bottom: 1088 };
+    let maxed = Rect { bottom: 1048, ..cs2 };
+    expect(covers_monitor(cs2, mon, work, true), "cs2 counts", failed);
+    expect(!covers_monitor(maxed, mon, work, true), "maximized doesn't", failed);
+    expect(!covers_monitor(cs2, mon, mon, true), "auto-hide: captioned doesn't", failed);
+    // inject queue: FIFO, real input behind queued injects is swallowed + replayed
+    let mut q = InjectQueue::default();
+    q.queue(&[Inject::ButtonDown(Btn::Left)]);
+    expect(q.apply_in_order(false, false, Inject::ButtonUp(Btn::Left)) == (true, true), "replay behind queue", failed);
+    expect(q.drain() == vec![Inject::ButtonDown(Btn::Left), Inject::ButtonUp(Btn::Left)], "fifo", failed);
+    println!(
+        "simulate: upstream sync ok (chord passthrough, fullscreen pause [probe {}], inject queue)",
+        if crate::input::fullscreen::PROBE_AVAILABLE { "native" } else { "n/a on this OS" }
+    );
 }

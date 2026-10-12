@@ -79,6 +79,11 @@ R2_PREFIX=v2 python3 scripts/upload-assets.py dist/assets-v2   # with R2_* env f
 Runtime env: `LOLPING_NO_V2=1` (force v1), `LOLPING_ASSET_BASE_V2` (override v2 base; default = v1 base with `/v1`→`/v2`).
 Settings → Download all fetches the v2 zip when VP9 is available (its png/ogg/wav also serve v1 lookups).
 
+### Games / other chords
+
+- **Pause in fullscreen apps** (default on): holding the trigger while a fullscreen app (a game) owns the monitor under the cursor does nothing; gestures resume on the desktop and on other monitors. Maximized windows don't count.
+- A trigger that is part of another chord (Alt+Tab, Win+Tab, Alt+F4, Cmd+Tab …) doesn't open/place a wheel until it is released.
+
 ## Layout
 
 ```

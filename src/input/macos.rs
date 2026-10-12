@@ -98,6 +98,16 @@ fn run_tap(
                     if key == KEY_P && cfg.pause_chord_matches(alt, ctrl, shift, meta) {
                         let _ = tx_cb.send(InputEvent::ToggleEnabled);
                     }
+                    // c104b08: a non-modifier key while a trigger is held (Cmd+Tab, Option+Tab …)
+                    // belongs to another chord. Autorepeat doesn't matter: the flag is idempotent.
+                    if cfg.enabled
+                        && super::decision::classify_mac_keycode(key) == super::decision::KeyClass::Other
+                    {
+                        let (p, e) = cfg.map_modifiers(alt, ctrl, shift, meta);
+                        if p || e {
+                            let _ = tx_cb.send(InputEvent::ForeignKey);
+                        }
+                    }
                 }
                 CGEventType::MouseMoved
                 | CGEventType::LeftMouseDragged

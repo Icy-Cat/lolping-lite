@@ -1,6 +1,8 @@
 //! Global input hooks — settings-driven triggers + pause chord.
 
 mod config;
+pub mod decision;
+pub mod fullscreen;
 #[cfg(target_os = "macos")]
 mod macos;
 #[cfg(target_os = "windows")]
@@ -29,6 +31,8 @@ pub enum InputEvent {
     PingModifier { down: bool },
     EmoteModifier { down: bool },
     MouseMove { x: f64, y: f64 },
+    /// A non-modifier key went down while a wheel trigger was held (Alt+Tab, Win+Tab …).
+    ForeignKey,
     /// Pause hotkey toggled enabled state.
     ToggleEnabled,
     Status(HookStatus),
@@ -99,7 +103,7 @@ impl InputHub {
             match self.rx.try_recv() {
                 Ok(ev) => {
                     self.handle(&ev);
-                    if matches!(ev, InputEvent::ToggleEnabled) {
+                    if matches!(ev, InputEvent::ToggleEnabled | InputEvent::ForeignKey) {
                         extras.push(ev);
                     }
                 }
@@ -127,6 +131,7 @@ impl InputHub {
                 self.shared.update(|g| g.emote_down = down);
                 self.push_log(format!("emote modifier {}", if down { "DOWN" } else { "UP" }));
             }
+            InputEvent::ForeignKey => {}
             InputEvent::MouseMove { x, y } => {
                 self.shared.update(|g| {
                     g.mouse_x = x;

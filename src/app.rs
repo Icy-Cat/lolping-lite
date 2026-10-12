@@ -422,6 +422,12 @@ impl eframe::App for LolPingApp {
         self.poll_assets();
         // Pause hotkey from hooks
         for ev in self.input.poll() {
+            if matches!(ev, InputEvent::ForeignKey) {
+                if self.gesture.foreign_key(crate::input::decision::KeyClass::Other) {
+                    self.log("trigger is part of another chord: wheel suppressed until release");
+                }
+                continue;
+            }
             if matches!(ev, InputEvent::ToggleEnabled) {
                 self.settings.enabled = self.input.enabled;
                 let _ = self.settings.save();
@@ -484,7 +490,15 @@ impl eframe::App for LolPingApp {
         let cancel = ctx.input(|i| i.key_pressed(egui::Key::Escape));
 
         let was_active = self.gesture.wheel_active();
-        let outcome = self.gesture.tick(ping_down, emote_down, local, cancel);
+        let game_check = self.settings.game_check && crate::input::fullscreen::PROBE_AVAILABLE;
+        let was_paused = self.gesture.game_paused;
+        let outcome = self.gesture.tick_gated(ping_down, emote_down, local, cancel, &mut || {
+            game_check && crate::input::fullscreen::click_is_on_fullscreen_app(gx, gy)
+        });
+        if self.gesture.game_paused && !was_paused {
+            self.status = "fullscreen app on this monitor: gesture paused".into();
+            self.log(self.status.clone());
+        }
         if self.gesture.wheel_active() && !was_active {
             self.wheel_display = disp_num;
         }
@@ -686,6 +700,9 @@ impl LolPingApp {
         });
         ui.checkbox(&mut self.settings.allow_internet, "Allow internet (Nostr)");
         ui.checkbox(&mut self.settings.launch_at_login, t.launch_at_login);
+        if crate::input::fullscreen::PROBE_AVAILABLE {
+            ui.checkbox(&mut self.settings.game_check, t.game_check).on_hover_text(t.game_check_desc);
+        }
         ui.checkbox(&mut self.settings.enabled, "Enabled");
 
         ui.separator();

@@ -79,3 +79,14 @@ R2_PREFIX=v2 python3 scripts/upload-assets.py dist/assets-v2   # with R2_* env f
 
 Runtime env: `LOLPING_NO_V2=1` (force v1), `LOLPING_ASSET_BASE_V2` (override v2 base; default = v1 base with `/v1`→`/v2`).
 Settings → Download all fetches the v2 zip when VP9 is available (its png/ogg/wav also serve v1 lookups).
+
+## Upstream sync up to f24a51e (darrenprx/lolPing)
+
+| Upstream commit(s) | What | Status in lolping-lite |
+|---|---|---|
+| 6030e94, 645cad9, bd64923, 684de87 | Pause wheel gestures while a fullscreen app/game owns the monitor under the cursor; maximized windows don't count; no WS_CAPTION check (CS2 keeps it) except where the monitor has no work area | ✅ Windows: same probe (`src/input/fullscreen.rs`, rule in `decision::covers_monitor`). macOS: best effort — front-most layer-0 window of another app whose CGWindowList bounds contain the display (zoomed windows stop under the menu bar). Setting **Pause in fullscreen apps** (`game_check`, default on) + en/zh strings as upstream. Probed only when a gesture would start. |
+| c104b08 | Trigger that is part of another chord (Alt+Tab, Win+Tab, Alt+F4, Cmd+Tab …) passes through; cleared when every trigger is released / on key re-sync | ✅ both platforms. lolping-lite opens its wheel on trigger-down, so a foreign key before any slot is chosen drops the wheel silently and blocks gestures until release. Esc stays the wheel's cancel key; modifiers never mark. |
+| 9256530, e2e26a1 | SendInput only from the hook thread's message loop (FIFO queue, "LPIN" marker); real input that would overtake queued injects is swallowed and replayed; injected keys carry scan codes | ✅ in `src/input/windows.rs` (`decision::InjectQueue`). lolping-lite's gestures are listen-only today, so the queue is normally empty — the ordering guarantees are in place for any future inject. |
+| 7b118fc, f24a51e, b1181e9 | Helper-process watchdog, settings-save test flake, version bump | n/a (no separate helper process / Electron) |
+
+Tests mirroring `helper_tests.cpp`: `src/input/decision.rs`, `src/gesture.rs` (`cargo test`), plus `--simulate` "upstream sync" checks.

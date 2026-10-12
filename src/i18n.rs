@@ -28,6 +28,8 @@ pub struct Strings {
     pub leave_room: &'static str,
     pub room_code: &'static str,
     pub paused: &'static str,
+    pub game_check: &'static str,
+    pub game_check_desc: &'static str,
 }
 
 pub fn strings(lang: Lang) -> Strings {
@@ -50,6 +52,8 @@ pub fn strings(lang: Lang) -> Strings {
             leave_room: "Leave",
             room_code: "Room code",
             paused: "Paused",
+            game_check: "Pause in fullscreen apps",
+            game_check_desc: "Games and other fullscreen apps keep every click: trigger + click passes through there, and gestures resume on the desktop",
         },
         Lang::Zh => Strings {
             app_title: "lolPing-lite",
@@ -69,6 +73,8 @@ pub fn strings(lang: Lang) -> Strings {
             leave_room: "离开",
             room_code: "房间码",
             paused: "已暂停",
+            game_check: "全屏程序中暂停",
+            game_check_desc: "游戏等全屏程序独占点击：触发键 + 单击原样交给程序，回到桌面后手势恢复正常",
         },
     }
 }

@@ -17,6 +17,7 @@ pub enum TriggerKey {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct Settings {
     pub version: u32,
     pub trigger: TriggerKey,
@@ -39,6 +40,8 @@ pub struct Settings {
     pub auto_update_check: bool,
     /// Pause chord: Ctrl+Alt+P (documented; mods fixed for now).
     pub pause_hotkey_label: String,
+    /// Upstream `gameCheck` (default on): fullscreen apps keep the trigger; gestures resume on the desktop.
+    pub game_check: bool,
 }
 
 impl Default for Settings {
@@ -62,6 +65,7 @@ impl Default for Settings {
             emote_wheel: Vec::new(),
             auto_update_check: false,
             pause_hotkey_label: "Ctrl+Alt+P".into(),
+            game_check: true,
         }
     }
 }
@@ -161,6 +165,14 @@ mod tests {
         let back: Settings = serde_json::from_str(&j).unwrap();
         assert_eq!(back.ping_size_px, 110);
         assert_eq!(back.wheel.len(), 8);
+        assert!(back.game_check);
+    }
+
+    #[test]
+    fn old_settings_without_new_fields_keep_values() {
+        let s: Settings = serde_json::from_str(r#"{"ping_size_px": 140}"#).unwrap();
+        assert_eq!(s.ping_size_px, 140);
+        assert!(s.game_check, "gameCheck defaults on");
     }
 
     #[test]
