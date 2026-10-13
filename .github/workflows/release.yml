@@ -1,0 +1,124 @@
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to build for (e.g. v0.1.0); empty = branch SHA only"
+        required: false
+        default: ""
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  macos:
+    name: macOS arm64
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build libvpx (VP9 decoder)
+        run: scripts/build-libvpx.sh
+
+      - name: Release build
+        run: cargo build --release
+
+      - name: Package .app + DMG
+        run: scripts/package-macos.sh
+        env:
+          SKIP_BUILD: "1"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-arm64
+          path: dist/macos/*.dmg
+          if-no-files-found: error
+
+  windows:
+    name: Windows x64
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      # libvpx on MSVC is non-trivial; ship v1 WebP-only for Windows in v0.1.x.
+      - name: Release build (no VP9)
+        run: cargo build --release
+        env:
+          LOLPING_NO_VP9: "1"
+
+      - name: Package zip
+        shell: pwsh
+        run: scripts/package-windows.ps1
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-x64
+          path: dist/windows/*.zip
+          if-no-files-found: error
+
+  publish:
+    name: GitHub Release
+    needs: [macos, windows]
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Collect release files
+        run: |
+          mkdir -p release-files
+          find artifacts -type f \( -name '*.dmg' -o -name '*.zip' \) -exec cp -v {} release-files/ \;
+          ls -lh release-files
+
+      - name: Create / update GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: release-files/*
+          generate_release_notes: true
+          body: |
+            ## LolPing Lite ${{ github.ref_name }}
+
+            Ultra-light Rust rewrite of [darrenprx/lolPing](https://github.com/darrenprx/lolPing).
+            **Assets are not bundled** — they download on demand from `https://lolping-assets.icy-cat.com/`.
+
+            | Artifact | Contents | Notes |
+            |---|---|---|
+            | `LolPing-Lite-*-macos-arm64.dmg` | `.app` (Apple Silicon) | VP9/v2 WebM linked; **ad-hoc signed**, not notarized |
+            | `LolPing-Lite-*-windows-x64.zip` | portable `lolping-lite.exe` | **v1 WebP only** (no libvpx in this build) |
+
+            ### macOS install
+            1. Open the DMG → drag **LolPing Lite** to Applications.
+            2. First open: right-click → Open (or `xattr -cr "/Applications/LolPing Lite.app"`).
+            3. Grant **Accessibility** in System Settings → Privacy & Security.
+
+            ### Windows install
+            Unzip and run `lolping-lite.exe`. Allow firewall if you use LAN rooms.
+
+            Code MIT; ping/emote media © Riot Games. Not endorsed by Riot.
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
