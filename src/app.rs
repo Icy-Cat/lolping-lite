@@ -427,7 +427,14 @@ fn upload_anim(ctx: &egui::Context, anim: &EmoteAnimation) -> (String, Vec<Textu
 
 impl eframe::App for LolPingApp {
     fn clear_color(&self, _: &egui::Visuals) -> [f32; 4] {
-        [0.0, 0.0, 0.0, 0.0]
+        // Root viewport hosts the settings shell; keep it opaque dark.
+        // Overlay child viewports use their own transparent clear via Frame::NONE.
+        if self.show_settings {
+            let c = 32.0 / 255.0;
+            [c, c, c, 1.0]
+        } else {
+            [0.0, 0.0, 0.0, 0.0]
+        }
     }
 
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
@@ -625,11 +632,12 @@ impl LolPingApp {
 
 
     fn paint_settings_viewport(&mut self, ctx: &egui::Context) {
-        if !self.show_settings {
-            return;
+        // Always drive the settings shell so it can hide the root viewport
+        // when closed (overlays keep running in child viewports).
+        if self.show_settings {
+            self.ensure_ping_icons(ctx);
+            self.ensure_emote_icons(ctx);
         }
-        self.ensure_ping_icons(ctx);
-        self.ensure_emote_icons(ctx);
 
         let emote_names: Vec<String> = self.catalog.emotes().iter().map(|e| e.name.clone()).collect();
         let log: Vec<String> = self.event_log.iter().cloned().collect();

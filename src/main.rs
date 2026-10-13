@@ -29,15 +29,18 @@ fn run_gui(open_settings: bool) -> Result<()> {
     use eframe::egui;
     use lolping_lite::app::LolPingApp;
 
+    // Root viewport is the settings shell (Fluent left-nav). Overlay FX
+    // lives in per-display child viewports. Start opaque + interactive so
+    // `--settings` / Accessibility prompts are usable immediately.
     let native_options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([1100.0, 720.0])
-            .with_title("lolPing-lite")
-            .with_transparent(true)
+            .with_inner_size([960.0, 700.0])
+            .with_min_inner_size([720.0, 480.0])
+            .with_title("lolPing Lite — Settings")
+            .with_transparent(false)
             .with_decorations(true)
-            .with_always_on_top()
-            .with_mouse_passthrough(true)
-            .with_resizable(true),
+            .with_resizable(true)
+            .with_taskbar(true),
         ..Default::default()
     };
 

@@ -58,3 +58,9 @@ Dedicated **settings viewport** (~960×700, decorated, opaque dark Fluent-inspir
 ./target/release/lolping-lite --settings
 # or hold Option+Control while running
 ```
+
+## Layout fix (v0.1.3)
+
+Root cause of the "exclusive top strip" bug: settings used `show_viewport_immediate` + `CentralPanel` while ignoring `ViewportClass::Embedded`, so the shell often painted into the transparent root window; inside it, `ui.horizontal { sidebar; ScrollArea }` collapsed to a title-bar-height row, stacking nav labels sideways and clipping the page title.
+
+Fix: paint Fluent **SidePanel (240px) + CentralPanel** directly on the root viewport; hide the root when settings is closed. Overlays stay per-display child viewports.

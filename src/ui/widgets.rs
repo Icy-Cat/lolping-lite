@@ -222,26 +222,31 @@ pub fn nav_button(ui: &mut egui::Ui, icon: &str, label: &str, selected: bool) ->
         .corner_radius(4.0)
         .inner_margin(egui::Margin::symmetric(12, 8))
         .show(ui, |ui| {
-            ui.set_min_width(ui.available_width());
+            // Force a full-width row so SidePanel never collapses nav into a strip.
+            ui.set_width(ui.available_width());
             ui.horizontal(|ui| {
-                if selected {
-                    let rect = ui.max_rect();
-                    ui.painter().rect_filled(
-                        egui::Rect::from_min_size(
-                            egui::pos2(rect.left() - 12.0, rect.top() + 6.0),
-                            Vec2::new(3.0, 16.0),
-                        ),
-                        2.0,
-                        BRAND,
-                    );
-                }
                 ui.label(RichText::new(icon).size(16.0));
                 ui.add_space(10.0);
-                ui.label(RichText::new(label).size(13.0).color(if selected { TEXT } else { TEXT2 }));
+                ui.label(
+                    RichText::new(label)
+                        .size(13.0)
+                        .color(if selected { TEXT } else { TEXT2 }),
+                );
             });
         })
         .response
         .interact(Sense::click());
+    if selected {
+        let r = resp.rect;
+        ui.painter().rect_filled(
+            egui::Rect::from_min_size(
+                egui::pos2(r.left() + 2.0, r.top() + 8.0),
+                Vec2::new(3.0, (r.height() - 16.0).max(12.0)),
+            ),
+            2.0,
+            BRAND,
+        );
+    }
     resp.clicked()
 }
 

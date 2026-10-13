@@ -1,6 +1,6 @@
 [package]
 name = "lolping-lite"
-version = "0.1.2"
+version = "0.1.3"
 edition = "2021"
 description = "Ultra-light League of Legends-style desktop ping / emote wheel (Rust rewrite)"
 license = "MIT"

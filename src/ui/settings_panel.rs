@@ -12,8 +12,7 @@ use crate::room::RoomHub;
 use crate::settings::{Settings, TriggerKey};
 use crate::wheel::{PINGS, WHEEL_SLOTS};
 use eframe::egui::{
-    self, Color32, Pos2, RichText, Sense, Shape, Stroke, TextureHandle, Vec2, ViewportBuilder,
-    ViewportClass, ViewportId,
+    self, Color32, Pos2, RichText, Sense, Shape, Stroke, TextureHandle, Vec2,
 };
 use std::f32::consts::TAU;
 use std::sync::atomic::Ordering;
@@ -73,6 +72,8 @@ pub struct SettingsUiState {
     pub room_error: Option<String>,
     pub copied_at: Option<std::time::Instant>,
     pub theme_applied: bool,
+    /// Root viewport has been sized for the settings shell this session.
+    pub shell_sized: bool,
 }
 
 impl Default for NavSection {
@@ -104,7 +105,16 @@ pub struct SettingsHost<'a> {
 }
 
 pub fn paint_settings_viewport(ctx: &egui::Context, open: &mut bool, mut host: SettingsHost<'_>) {
+    // Settings always paints on the *root* viewport. A nested
+    // `show_viewport_immediate` was either Embedded (CentralPanel then
+    // collided with an empty horizontal strip in the root window) or a
+    // second OS window whose layout still used `ui.horizontal`, which
+    // collapsed the side nav into a single title-bar-height row.
     if !*open {
+        // Keep the root chrome out of the way while only overlays run.
+        host.ui_state.shell_sized = false;
+        ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+        ctx.send_viewport_cmd(egui::ViewportCommand::MousePassthrough(true));
         return;
     }
     if !host.ui_state.theme_applied {
@@ -113,90 +123,92 @@ pub fn paint_settings_viewport(ctx: &egui::Context, open: &mut bool, mut host: S
     }
 
     let t = strings(host.settings.language);
-    let builder = ViewportBuilder::default()
-        .with_title(format!("{} — {}", t.app_title, t.page_title))
-        .with_inner_size([960.0, 700.0])
-        .with_min_inner_size([720.0, 480.0])
-        .with_decorations(true)
-        .with_transparent(false)
-        .with_resizable(true)
-        .with_taskbar(true);
+    ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+    ctx.send_viewport_cmd(egui::ViewportCommand::Title(format!(
+        "{} — {}",
+        t.app_title, t.page_title
+    )));
+    ctx.send_viewport_cmd(egui::ViewportCommand::Decorations(true));
+    ctx.send_viewport_cmd(egui::ViewportCommand::Transparent(false));
+    ctx.send_viewport_cmd(egui::ViewportCommand::WindowLevel(
+        egui::WindowLevel::Normal,
+    ));
+    ctx.send_viewport_cmd(egui::ViewportCommand::MousePassthrough(false));
+    ctx.send_viewport_cmd(egui::ViewportCommand::MinInnerSize(egui::vec2(720.0, 480.0)));
+    if !host.ui_state.shell_sized {
+        ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(960.0, 700.0)));
+        host.ui_state.shell_sized = true;
+    }
 
-    let id = ViewportId::from_hash_of("lolping-settings");
-    let mut closed = false;
-    ctx.show_viewport_immediate(id, builder, |ctx, class| {
-        let _ = class;
-        if ctx.input(|i| i.viewport().close_requested()) {
-            closed = true;
-            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
-        }
-        egui::CentralPanel::default()
-            .frame(egui::Frame::NONE.fill(BG).inner_margin(0.0))
-            .show(ctx, |ui| {
-                paint_settings_body(ui, &mut host, &t);
-            });
-        ctx.request_repaint_after(std::time::Duration::from_millis(200));
-    });
-    if closed {
+    if ctx.input(|i| i.viewport().close_requested()) {
         *open = false;
         *host.close_requested = true;
+        ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+        return;
     }
+
+    paint_settings_shell(ctx, &mut host, &t);
+    ctx.request_repaint_after(std::time::Duration::from_millis(200));
 }
 
-fn paint_settings_body(ui: &mut egui::Ui, host: &mut SettingsHost<'_>, t: &Strings) {
+fn paint_settings_shell(ctx: &egui::Context, host: &mut SettingsHost<'_>, t: &Strings) {
     let mut dirty = false;
-    ui.horizontal(|ui| {
-        // —— side nav ——
-        egui::Frame::NONE
-            .fill(BG_SIDE)
-            .inner_margin(egui::Margin::symmetric(8, 8))
-            .show(ui, |ui| {
-                ui.set_width(220.0);
-                ui.set_min_height(ui.available_height());
-                ui.horizontal(|ui| {
-                    ui.label(RichText::new("◉").size(28.0).color(BRAND));
-                    ui.vertical(|ui| {
-                        ui.label(RichText::new(t.app_title).strong().size(16.0));
-                        ui.label(RichText::new(t.tagline).size(11.0).color(TEXT3));
-                    });
-                });
-                ui.add_space(12.0);
-                for sec in NavSection::ALL {
-                    if nav_button(ui, sec.icon(), sec.label(t), host.ui_state.nav == sec) {
-                        host.ui_state.nav = sec;
-                    }
-                }
-                ui.with_layout(egui::Layout::bottom_up(egui::Align::LEFT), |ui| {
-                    ui.add_space(8.0);
-                    if primary_button(ui, t.close).clicked() {
-                        *host.close_requested = true;
-                    }
-                });
-            });
 
-        // —— content ——
-        egui::ScrollArea::vertical()
-            .auto_shrink([false, false])
-            .show(ui, |ui| {
-                ui.set_min_width(ui.available_width());
-                egui::Frame::NONE
-                    .inner_margin(egui::Margin {
-                        left: 20,
-                        right: 28,
-                        top: 8,
-                        bottom: 28,
-                    })
-                    .show(ui, |ui| {
-                        dirty |= paint_content(ui, host, t);
-                    });
+    egui::SidePanel::left("lolping_settings_nav")
+        .exact_width(240.0)
+        .resizable(false)
+        .frame(
+            egui::Frame::NONE
+                .fill(BG_SIDE)
+                .inner_margin(egui::Margin::symmetric(10, 12)),
+        )
+        .show(ctx, |ui| {
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("◉").size(28.0).color(BRAND));
+                ui.add_space(6.0);
+                ui.vertical(|ui| {
+                    ui.label(RichText::new(t.app_title).strong().size(16.0));
+                    ui.label(RichText::new(t.tagline).size(11.0).color(TEXT3));
+                });
             });
-    });
+            ui.add_space(16.0);
+            for sec in NavSection::ALL {
+                if nav_button(ui, sec.icon(), sec.label(t), host.ui_state.nav == sec) {
+                    host.ui_state.nav = sec;
+                }
+                ui.add_space(2.0);
+            }
+            ui.with_layout(egui::Layout::bottom_up(egui::Align::Center), |ui| {
+                ui.add_space(8.0);
+                ui.set_min_width(ui.available_width());
+                if primary_button(ui, t.close).clicked() {
+                    *host.close_requested = true;
+                }
+            });
+        });
+
+    egui::CentralPanel::default()
+        .frame(egui::Frame::NONE.fill(BG).inner_margin(0.0))
+        .show(ctx, |ui| {
+            egui::ScrollArea::vertical()
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    egui::Frame::NONE
+                        .inner_margin(egui::Margin {
+                            left: 24,
+                            right: 28,
+                            top: 16,
+                            bottom: 28,
+                        })
+                        .show(ui, |ui| {
+                            ui.set_min_width(ui.available_width());
+                            dirty |= paint_content(ui, host, t);
+                        });
+                });
+        });
 
     if dirty {
         (host.on_settings_changed)(host.settings);
-    }
-    if *host.close_requested {
-        // parent clears `open`
     }
 }
 
