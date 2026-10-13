@@ -1,4 +1,8 @@
 //! macOS CGEventTap — respects SharedConfig triggers + pause (Ctrl+Alt+P).
+//!
+//! Keeps the status channel alive: if Accessibility is missing or the tap dies,
+//! we retry instead of dropping the Sender (which used to surface as
+//! `Failed("input channel disconnected")` and left the UI looking dead).
 
 use super::{HookStatus, InputConfig, InputEvent, SharedConfig, SharedInput};
 use core_foundation::runloop::{kCFRunLoopCommonModes, CFRunLoop};
@@ -9,25 +13,62 @@ use core_graphics::event::{
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Sender;
 use std::sync::Arc;
+use std::time::Duration;
 
 /// ANSI P on US keyboard (kVK_ANSI_P).
 const KEY_P: i64 = 0x23;
 
 pub fn spawn(tx: Sender<InputEvent>, shared: SharedInput, config: SharedConfig) -> HookStatus {
-    if !accessibility_trusted(true) {
-        let _ = tx.send(InputEvent::Status(HookStatus::NeedsAccessibility));
-        return HookStatus::NeedsAccessibility;
-    }
     let tx_thread = tx.clone();
-    std::thread::Builder::new()
+    match std::thread::Builder::new()
         .name("lolping-cgeventtap".into())
-        .spawn(move || {
-            if let Err(status) = run_tap(tx_thread.clone(), shared, config) {
-                let _ = tx_thread.send(InputEvent::Status(status));
+        .spawn(move || supervisor(tx_thread, shared, config))
+    {
+        Ok(_) => HookStatus::Starting,
+        Err(_) => {
+            let _ = tx.send(InputEvent::Status(HookStatus::Failed(
+                "failed to spawn CGEventTap thread",
+            )));
+            HookStatus::Failed("failed to spawn CGEventTap thread")
+        }
+    }
+}
+
+fn supervisor(tx: Sender<InputEvent>, shared: SharedInput, config: SharedConfig) {
+    let mut prompted = false;
+    loop {
+        // Prompt once; then poll quietly so we pick up a grant from System Settings
+        // without spamming the OS dialog.
+        let trusted = if prompted {
+            accessibility_trusted(false)
+        } else {
+            prompted = true;
+            accessibility_trusted(true)
+        };
+        if !trusted {
+            let _ = tx.send(InputEvent::Status(HookStatus::NeedsAccessibility));
+            std::thread::sleep(Duration::from_secs(2));
+            continue;
+        }
+
+        match run_tap(tx.clone(), shared.clone(), config.clone()) {
+            Ok(()) => {
+                // Run loop ended unexpectedly — retry.
+                let _ = tx.send(InputEvent::Status(HookStatus::Failed(
+                    "CGEventTap run loop exited",
+                )));
+                std::thread::sleep(Duration::from_secs(1));
             }
-        })
-        .ok();
-    HookStatus::Starting
+            Err(status) => {
+                let _ = tx.send(InputEvent::Status(status));
+                // Accessibility can be revoked at runtime; re-check next iteration.
+                if matches!(status, HookStatus::NeedsAccessibility) {
+                    prompted = false;
+                }
+                std::thread::sleep(Duration::from_secs(2));
+            }
+        }
+    }
 }
 
 fn accessibility_trusted(prompt: bool) -> bool {
@@ -43,6 +84,11 @@ fn run_tap(
     shared: SharedInput,
     config: SharedConfig,
 ) -> Result<(), HookStatus> {
+    // Re-check right before creating the tap — the prompt may have been denied.
+    if !accessibility_trusted(false) {
+        return Err(HookStatus::NeedsAccessibility);
+    }
+
     let last_ping = Arc::new(AtomicBool::new(false));
     let last_emote = Arc::new(AtomicBool::new(false));
     let tx_cb = tx.clone();
@@ -129,7 +175,7 @@ fn run_tap(
             Some(event.clone())
         },
     )
-    .map_err(|_| HookStatus::Failed("CGEventTap::new failed"))?;
+    .map_err(|_| HookStatus::Failed("CGEventTap::new failed (check Accessibility)"))?;
 
     unsafe {
         let source = tap

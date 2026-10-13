@@ -68,6 +68,9 @@ pub struct InputHub {
     pub shared: SharedInput,
     pub config: SharedConfig,
     rx: Receiver<InputEvent>,
+    /// Kept so the channel never looks "disconnected" while we still expect a hook
+    /// (e.g. waiting for Accessibility). Dropped only when InputHub is dropped.
+    _keepalive: Sender<InputEvent>,
     pub status: HookStatus,
     log_lines: Vec<String>,
     /// Mirror of settings.enabled for UI.
@@ -85,6 +88,7 @@ impl InputHub {
             shared,
             config,
             rx,
+            _keepalive: tx,
             status,
             log_lines: Vec::new(),
             enabled: cfg.enabled,
@@ -109,7 +113,17 @@ impl InputHub {
                 }
                 Err(TryRecvError::Empty) => break,
                 Err(TryRecvError::Disconnected) => {
-                    self.status = HookStatus::Failed("input channel disconnected");
+                    // Should be rare now that we keep a keepalive Sender + macOS
+                    // supervisor thread. Still surface it without panicking the UI.
+                    if !matches!(
+                        self.status,
+                        HookStatus::NeedsAccessibility
+                            | HookStatus::Failed(_)
+                            | HookStatus::Unsupported(_)
+                    ) {
+                        self.status = HookStatus::Failed("input channel disconnected");
+                        self.push_log("hook status: Failed(input channel disconnected)".into());
+                    }
                     break;
                 }
             }
@@ -163,6 +177,15 @@ impl InputHub {
 
     pub fn recent_logs(&self) -> &[String] {
         &self.log_lines
+    }
+
+    /// True when global hooks are (or soon will be) delivering events.
+    pub fn hooks_live(&self) -> bool {
+        matches!(self.status, HookStatus::Running | HookStatus::Starting)
+    }
+
+    pub fn needs_accessibility(&self) -> bool {
+        matches!(self.status, HookStatus::NeedsAccessibility)
     }
 }
 

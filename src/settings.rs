@@ -101,11 +101,21 @@ impl Settings {
         if self.emote_wheel.len() > WHEEL_SLOTS {
             self.emote_wheel.truncate(WHEEL_SLOTS);
         }
-        for n in names.iter() {
-            if self.emote_wheel.len() >= WHEEL_SLOTS {
+        // Drop unknown names (and keep user picks that still exist).
+        self.emote_wheel.retain(|n| n.is_empty() || names.iter().any(|x| x == n));
+        // Fill empty slots / grow up to WHEEL_SLOTS from the catalog order.
+        // Important: a previous call with an empty catalog pads with "" — those
+        // empties must be replaced once the CDN manifest arrives.
+        for n in names {
+            if self.emote_wheel.iter().filter(|s| !s.is_empty()).count() >= WHEEL_SLOTS {
                 break;
             }
-            if !self.emote_wheel.contains(n) {
+            if self.emote_wheel.iter().any(|s| s == n) {
+                continue;
+            }
+            if let Some(slot) = self.emote_wheel.iter_mut().find(|s| s.is_empty()) {
+                *slot = n.clone();
+            } else if self.emote_wheel.len() < WHEEL_SLOTS {
                 self.emote_wheel.push(n.clone());
             }
         }
@@ -184,5 +194,19 @@ mod tests {
         let c = crate::input::InputConfig::from_settings(&s);
         assert_eq!(c.ping_trigger, TriggerKey::Shift);
         assert!(!c.enabled);
+    }
+
+    #[test]
+    fn emote_wheel_fills_after_empty_pad() {
+        let mut s = Settings::default();
+        s.ensure_emote_wheel(&[]); // first launch, no manifest yet
+        assert_eq!(s.emote_wheel.len(), WHEEL_SLOTS);
+        assert!(s.emote_wheel.iter().all(|n| n.is_empty()));
+        let names: Vec<String> = (0..12).map(|i| format!("e{i}")).collect();
+        s.ensure_emote_wheel(&names);
+        assert_eq!(
+            s.emote_wheel,
+            names.iter().take(WHEEL_SLOTS).cloned().collect::<Vec<_>>()
+        );
     }
 }

@@ -7,10 +7,12 @@
 //! | `Idle`           | beacon / FX only | **on**            | no gesture, debug UI closed             |
 //! | `PingGesture`    | ping wheel       | **off**           | Option held (macOS) / Alt (local)       |
 //! | `EmoteGesture`   | emote wheel      | **off**           | Control held / Ctrl (local)             |
-//! | `DebugUi`        | debug panel      | **off**           | pinned, or Option+Control chord         |
+//! | `DebugUi`        | debug panel      | **on**            | pinned, or Option+Control chord         |
 //!
-//! Rule: **wheel / debug / active FX needing hits → passthrough off**;
-//! **idle → passthrough on**. Gestures are **not** blocked by a pinned debug panel.
+//! Rule: **only active wheels need hits → passthrough off**;
+//! **idle / debug → passthrough on**. The debug/settings panel lives on the
+//! root window, not the fullscreen overlays — so pinning debug must NOT steal
+//! clicks from the rest of the desktop (that used to feel like a system freeze).
 //!
 //! Escape hatch while click-through: hold **Option+Control** to re-pin debug.
 
@@ -26,7 +28,9 @@ pub enum OverlayState {
 
 impl OverlayState {
     pub fn mouse_passthrough(self) -> bool {
-        matches!(self, Self::Idle)
+        // Fullscreen overlay viewports: only gesture wheels need to receive hits.
+        // DebugUi paints on the root window, so overlays stay click-through.
+        matches!(self, Self::Idle | Self::DebugUi)
     }
 
     pub fn label(self) -> &'static str {
@@ -34,7 +38,7 @@ impl OverlayState {
             Self::Idle => "Idle (passthrough ON)",
             Self::PingGesture => "PingGesture (passthrough OFF)",
             Self::EmoteGesture => "EmoteGesture (passthrough OFF)",
-            Self::DebugUi => "DebugUi (passthrough OFF)",
+            Self::DebugUi => "DebugUi (passthrough ON)",
         }
     }
 }
@@ -48,10 +52,12 @@ pub struct OverlayController {
 
 impl Default for OverlayController {
     fn default() -> Self {
+        // Release default: idle + click-through so launching the .app never
+        // blankets the desktop. `--settings` / Accessibility prompt pin debug.
         Self {
-            state: OverlayState::DebugUi,
+            state: OverlayState::Idle,
             applied_passthrough: None,
-            debug_pinned: true,
+            debug_pinned: false,
         }
     }
 }
@@ -88,8 +94,8 @@ impl OverlayController {
         self.state = if let Some(g) = gesture {
             g
         } else if self.debug_pinned || fx_blocking {
-            // Keep passthrough off while debug is up. FX alone does not need
-            // hits — they paint under passthrough — so fx_blocking reserved.
+            // Debug pin shows the root-window panel; overlays stay Idle/DebugUi
+            // with passthrough on. FX paints under passthrough.
             let _ = fx_blocking;
             if self.debug_pinned {
                 OverlayState::DebugUi
@@ -111,5 +117,36 @@ impl OverlayController {
                 self.state.label()
             );
         }
+    }
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_is_click_through() {
+        let o = OverlayController::default();
+        assert!(!o.debug_pinned());
+        assert_eq!(o.state(), OverlayState::Idle);
+        assert!(o.state().mouse_passthrough());
+    }
+
+    #[test]
+    fn debug_pin_does_not_steal_desktop_clicks() {
+        let mut o = OverlayController::default();
+        o.set_debug_pinned(true);
+        assert_eq!(o.state(), OverlayState::DebugUi);
+        assert!(
+            o.state().mouse_passthrough(),
+            "DebugUi must keep overlay passthrough ON"
+        );
+    }
+
+    #[test]
+    fn gesture_disables_passthrough() {
+        assert!(!OverlayState::PingGesture.mouse_passthrough());
+        assert!(!OverlayState::EmoteGesture.mouse_passthrough());
     }
 }

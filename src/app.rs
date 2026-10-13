@@ -73,10 +73,14 @@ impl LolPingApp {
             catalog.emote_count(),
             displays.len()
         );
+        let mut overlay = OverlayController::default();
+        if open_settings {
+            overlay.set_debug_pinned(true);
+        }
         let app = Self {
             catalog,
             input: InputHub::start(cfg),
-            overlay: OverlayController::default(),
+            overlay,
             gesture: GestureSession::default(),
             layers,
             audio,
@@ -217,6 +221,12 @@ impl LolPingApp {
             self.settings.ensure_emote_wheel(&names);
             self.sync_emote_slots_from_settings();
             self.prefetch_wheels();
+            self.status = format!(
+                "{} emotes · {} displays · audio ready",
+                self.catalog.emote_count(),
+                self.displays.len()
+            );
+            self.log(format!("assets ready: {} emotes", self.catalog.emote_count()));
         }
         self.ping_icons_ready = false;
         self.emote_icons_ready = false;
@@ -459,6 +469,11 @@ impl eframe::App for LolPingApp {
             }
         }
 
+        // Accessibility missing → keep a visible panel; never blanket the desktop.
+        if self.input.needs_accessibility() {
+            self.overlay.set_debug_pinned(true);
+        }
+
         if !self.settings.enabled {
             self.paint_overlays(ctx, true);
             self.paint_settings_window(ctx);
@@ -466,10 +481,7 @@ impl eframe::App for LolPingApp {
         }
 
         let snap = self.input.shared.get();
-        let hooks_live = matches!(
-            self.input.status,
-            HookStatus::Running | HookStatus::Starting
-        );
+        let hooks_live = self.input.hooks_live();
         let (raw_alt, raw_ctrl) = if hooks_live && snap.move_count > 0 {
             // Already mapped inside hook via settings — ping_down/emote_down are logical.
             (snap.ping_down, snap.emote_down)
@@ -622,6 +634,24 @@ impl LolPingApp {
                     self.settings.enabled
                 ));
                 ui.label(&self.status);
+                if self.input.needs_accessibility() {
+                    ui.colored_label(
+                        egui::Color32::from_rgb(255, 180, 60),
+                        "Accessibility permission required for global hotkeys.",
+                    );
+                    ui.label("System Settings → Privacy & Security → Accessibility → enable LolPing Lite.");
+                    if ui.button("Open Accessibility Settings").clicked() {
+                        open_accessibility_settings();
+                    }
+                    ui.separator();
+                } else if matches!(self.input.status, HookStatus::Failed(_)) {
+                    ui.colored_label(
+                        egui::Color32::LIGHT_RED,
+                        format!("Input hook failed: {:?}", self.input.status),
+                    );
+                    ui.label("Desktop click-through stays on so the Mac is still usable.");
+                    ui.separator();
+                }
                 let mut pin = self.overlay.debug_pinned();
                 if ui.checkbox(&mut pin, t.debug_pin).changed() {
                     self.overlay.set_debug_pinned(pin);
@@ -816,6 +846,22 @@ impl LolPingApp {
                 ui.colored_label(egui::Color32::LIGHT_RED, format!("Download failed: {e}"));
             }
             BulkState::Idle => {}
+        }
+    }
+}
+
+fn open_accessibility_settings() {
+    #[cfg(target_os = "macos")]
+    {
+        // Works on Ventura+ and older System Preferences URLs.
+        let urls = [
+            "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility",
+            "x-apple.systempreferences:com.apple.settings.PrivacySecurity.extension",
+        ];
+        for u in urls {
+            if std::process::Command::new("open").arg(u).status().map(|s| s.success()).unwrap_or(false) {
+                return;
+            }
         }
     }
 }
