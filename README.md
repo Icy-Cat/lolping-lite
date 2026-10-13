@@ -84,6 +84,30 @@ Settings → Download all fetches the v2 zip when VP9 is available (its png/ogg/
 - **Pause in fullscreen apps** (default on): holding the trigger while a fullscreen app (a game) owns the monitor under the cursor does nothing; gestures resume on the desktop and on other monitors. Maximized windows don't count.
 - A trigger that is part of another chord (Alt+Tab, Win+Tab, Alt+F4, Cmd+Tab …) doesn't open/place a wheel until it is released.
 
+
+## Releases / packaging
+
+Installers download from [GitHub Releases](https://github.com/Icy-Cat/lolping-lite/releases).
+**Assets are not inside the package** — first use pulls them from Cloudflare R2.
+
+| Platform | Artifact | Notes |
+|---|---|---|
+| macOS Apple Silicon | `LolPing-Lite-*-macos-arm64.dmg` | `.app` with static libvpx (v2 WebM). Ad-hoc signed; not notarized. |
+| Windows x64 | `LolPing-Lite-*-windows-x64.zip` | Portable exe. Currently **v1 WebP only** (no libvpx in CI). |
+
+### Local packaging
+
+```bash
+# macOS (builds libvpx if missing, then .app + DMG under dist/macos/)
+scripts/package-macos.sh
+
+# Windows (after cargo build --release)
+powershell -File scripts/package-windows.ps1
+```
+
+Tag `v*` pushes run [`.github/workflows/release.yml`](.github/workflows/release.yml)
+(macos-14 + windows-latest) and publish a GitHub Release.
+
 ## Layout
 
 ```
