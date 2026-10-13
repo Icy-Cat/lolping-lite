@@ -5,11 +5,11 @@ use crate::audio::AudioOut;
 use crate::display::{self, DisplayInfo};
 use crate::fx::{self, EmoteAnim, FxLayer};
 use crate::gesture::{GestureKind, GestureOutcome, GestureSession};
-use crate::i18n::{self, strings};
-use crate::input::{HookStatus, InputConfig, InputEvent, InputHub};
+use crate::input::{InputConfig, InputEvent, InputHub};
 use crate::overlay::OverlayController;
 use crate::room::{RoomEvent, RoomHub};
-use crate::settings::{Settings, TriggerKey};
+use crate::settings::Settings;
+use crate::ui::SettingsUiState;
 use crate::wheel::{paint_wheel, hover_slot, WheelPaint, PINGS, WHEEL_SLOTS};
 use eframe::egui::{self, Pos2, TextureHandle, ViewportBuilder, ViewportClass, ViewportId};
 use std::collections::VecDeque;
@@ -43,6 +43,7 @@ pub struct LolPingApp {
     /// Which display the active wheel is on.
     wheel_display: u32,
     asset_gen: u64,
+    settings_ui: SettingsUiState,
 }
 
 impl LolPingApp {
@@ -52,6 +53,9 @@ impl LolPingApp {
         let names: Vec<String> = catalog.emotes().iter().map(|e| e.name.clone()).collect();
         settings.ensure_emote_wheel(&names);
         settings.ensure_ping_wheel();
+        if !settings.enabled_on_start {
+            settings.enabled = false;
+        }
         let mut emote_slot_names = std::array::from_fn(|_| String::new());
         for (i, n) in settings.emote_wheel.iter().take(WHEEL_SLOTS).enumerate() {
             emote_slot_names[i] = n.clone();
@@ -73,10 +77,7 @@ impl LolPingApp {
             catalog.emote_count(),
             displays.len()
         );
-        let mut overlay = OverlayController::default();
-        if open_settings {
-            overlay.set_debug_pinned(true);
-        }
+        let overlay = OverlayController::default();
         let app = Self {
             catalog,
             input: InputHub::start(cfg),
@@ -99,6 +100,7 @@ impl LolPingApp {
             event_log: VecDeque::new(),
             wheel_display: 1,
             asset_gen: 0,
+            settings_ui: SettingsUiState::default(),
         };
         app.prefetch_wheels();
         app
@@ -469,14 +471,14 @@ impl eframe::App for LolPingApp {
             }
         }
 
-        // Accessibility missing → keep a visible panel; never blanket the desktop.
+        // Accessibility missing → open the real settings window (permission card).
         if self.input.needs_accessibility() {
-            self.overlay.set_debug_pinned(true);
+            self.show_settings = true;
         }
 
         if !self.settings.enabled {
             self.paint_overlays(ctx, true);
-            self.paint_settings_window(ctx);
+            self.paint_settings_viewport(ctx);
             return;
         }
 
@@ -524,10 +526,13 @@ impl eframe::App for LolPingApp {
             }
         }
 
-        if self.show_settings {
-            self.overlay.set_debug_pinned(true);
-        }
+        // Option+Control chord still opens settings (via overlay sync pinning → we map to show_settings).
+        let was_debug = self.overlay.debug_pinned();
         self.overlay.sync(ping_down, emote_down, self.gesture.overlay_hint(), false);
+        if self.overlay.debug_pinned() && !was_debug {
+            self.show_settings = true;
+            self.overlay.set_debug_pinned(false);
+        }
         // Passthrough applied per overlay viewport below.
 
         let busy = self.gesture.wheel_active() || self.layers.iter().any(|l| l.fx.active());
@@ -538,7 +543,7 @@ impl eframe::App for LolPingApp {
         }
 
         self.paint_overlays(ctx, self.overlay.state().mouse_passthrough());
-        self.paint_settings_window(ctx);
+        self.paint_settings_viewport(ctx);
     }
 }
 
@@ -618,237 +623,66 @@ impl LolPingApp {
         }
     }
 
-    fn paint_settings_window(&mut self, ctx: &egui::Context) {
-        if !(self.overlay.debug_pinned() || self.show_settings || !self.settings.enabled) {
+
+    fn paint_settings_viewport(&mut self, ctx: &egui::Context) {
+        if !self.show_settings {
             return;
         }
-        let t = strings(self.settings.language);
-        egui::Window::new(t.app_title)
-            .default_pos(egui::pos2(40.0, 40.0))
-            .default_width(380.0)
-            .show(ctx, |ui| {
-                ui.label(format!(
-                    "{} · {:?} · enabled={}",
-                    self.overlay.state().label(),
-                    self.input.status,
-                    self.settings.enabled
-                ));
-                ui.label(&self.status);
-                if self.input.needs_accessibility() {
-                    ui.colored_label(
-                        egui::Color32::from_rgb(255, 180, 60),
-                        "Accessibility permission required for global hotkeys.",
-                    );
-                    ui.label("System Settings → Privacy & Security → Accessibility → enable LolPing Lite.");
-                    if ui.button("Open Accessibility Settings").clicked() {
-                        open_accessibility_settings();
-                    }
-                    ui.separator();
-                } else if matches!(self.input.status, HookStatus::Failed(_)) {
-                    ui.colored_label(
-                        egui::Color32::LIGHT_RED,
-                        format!("Input hook failed: {:?}", self.input.status),
-                    );
-                    ui.label("Desktop click-through stays on so the Mac is still usable.");
-                    ui.separator();
-                }
-                let mut pin = self.overlay.debug_pinned();
-                if ui.checkbox(&mut pin, t.debug_pin).changed() {
-                    self.overlay.set_debug_pinned(pin);
-                }
-                if ui.button(t.settings).clicked() {
-                    self.show_settings = !self.show_settings;
-                }
-                if self.show_settings {
-                    ui.separator();
-                    self.draw_settings(ui, &t);
-                }
-                ui.separator();
-                ui.heading(t.room);
-                if let Some(code) = self.room.code_display() {
-                    ui.monospace(&code);
-                    if ui.button(t.leave_room).clicked() {
-                        self.room.leave();
-                    }
-                } else {
-                    if ui.button(t.create_room).clicked() {
-                        if let Ok(c) = self.room.create() {
-                            self.room_code_input = c;
-                        }
-                    }
-                    ui.horizontal(|ui| {
-                        ui.text_edit_singleline(&mut self.room_code_input);
-                        if ui.button(t.join_room).clicked() {
-                            let _ = self.room.join(&self.room_code_input);
-                        }
-                    });
-                }
-                ui.collapsing("log", |ui| {
-                    for line in self.event_log.iter().take(10) {
-                        ui.monospace(line);
-                    }
-                });
-            });
-    }
+        self.ensure_ping_icons(ctx);
+        self.ensure_emote_icons(ctx);
 
-    fn draw_settings(&mut self, ui: &mut egui::Ui, t: &i18n::Strings) {
-        egui::ComboBox::from_label(t.trigger)
-            .selected_text(format!("{:?}", self.settings.trigger))
-            .show_ui(ui, |ui| {
-                for k in [TriggerKey::Alt, TriggerKey::Ctrl, TriggerKey::Shift, TriggerKey::Win] {
-                    ui.selectable_value(&mut self.settings.trigger, k, format!("{k:?}"));
-                }
-            });
-        egui::ComboBox::from_label(t.emote_trigger)
-            .selected_text(format!("{:?}", self.settings.emote_trigger))
-            .show_ui(ui, |ui| {
-                for k in [TriggerKey::Ctrl, TriggerKey::Alt, TriggerKey::Shift, TriggerKey::Win] {
-                    ui.selectable_value(&mut self.settings.emote_trigger, k, format!("{k:?}"));
-                }
-            });
-        ui.label(format!("Pause hotkey: {}", self.settings.pause_hotkey_label));
-        ui.add(egui::Slider::new(&mut self.settings.ping_size_px, 60..=220).text(t.ping_size));
-        ui.add(egui::Slider::new(&mut self.settings.emote_size_px, 60..=260).text(t.emote_size));
-        if ui
-            .add(egui::Slider::new(&mut self.settings.volume, 0..=100).text(t.volume))
-            .changed()
-        {
-            self.audio.set_volume(self.settings.volume);
-        }
-        if ui.checkbox(&mut self.settings.muted, t.muted).changed() {
-            self.audio.set_muted(self.settings.muted);
-        }
-        egui::ComboBox::from_label(t.language)
-            .selected_text(format!("{:?}", self.settings.language))
-            .show_ui(ui, |ui| {
-                ui.selectable_value(&mut self.settings.language, i18n::Lang::En, "English");
-                ui.selectable_value(&mut self.settings.language, i18n::Lang::Zh, "中文");
-            });
-        ui.horizontal(|ui| {
-            ui.label("Name");
-            ui.text_edit_singleline(&mut self.settings.display_name);
-        });
-        ui.checkbox(&mut self.settings.allow_internet, "Allow internet (Nostr)");
-        ui.checkbox(&mut self.settings.launch_at_login, t.launch_at_login);
-        if crate::input::fullscreen::PROBE_AVAILABLE {
-            ui.checkbox(&mut self.settings.game_check, t.game_check).on_hover_text(t.game_check_desc);
-        }
-        ui.checkbox(&mut self.settings.enabled, "Enabled");
+        let emote_names: Vec<String> = self.catalog.emotes().iter().map(|e| e.name.clone()).collect();
+        let log: Vec<String> = self.event_log.iter().cloned().collect();
+        let needs = self.input.needs_accessibility();
+        let hooks_live = self.input.hooks_live();
+        let status = self.input.status.clone();
+        let status_line = self.status.clone();
+        let mut close_requested = false;
 
-        ui.separator();
-        ui.strong("Ping wheel (8 slots)");
-        for i in 0..WHEEL_SLOTS {
-            while self.settings.wheel.len() <= i {
-                self.settings.wheel.push(PINGS[0].id.to_string());
-            }
-            let mut cur = self.settings.wheel[i].clone();
-            egui::ComboBox::from_id_salt(format!("ping-slot-{i}"))
-                .selected_text(cur.clone())
-                .show_ui(ui, |ui| {
-                    for p in &PINGS {
-                        if ui.selectable_label(cur == p.id, p.label).clicked() {
-                            cur = p.id.to_string();
-                        }
-                    }
-                });
-            self.settings.wheel[i] = cur;
-        }
-
-        ui.separator();
-        ui.strong("Emote wheel (8 slots)");
-        let names: Vec<String> = self.catalog.emotes().iter().map(|e| e.name.clone()).collect();
-        for i in 0..WHEEL_SLOTS {
-            while self.settings.emote_wheel.len() <= i {
-                self.settings.emote_wheel.push(String::new());
-            }
-            let mut cur = self.settings.emote_wheel[i].clone();
-            egui::ComboBox::from_id_salt(format!("emote-slot-{i}"))
-                .selected_text(if cur.is_empty() { "(empty)".into() } else { cur.clone() })
-                .show_ui(ui, |ui| {
-                    if ui.selectable_label(cur.is_empty(), "(empty)").clicked() {
-                        cur.clear();
-                    }
-                    for n in &names {
-                        if ui.selectable_label(cur == *n, n).clicked() {
-                            cur = n.clone();
-                        }
-                    }
-                });
-            self.settings.emote_wheel[i] = cur;
-        }
-
-        ui.separator();
-        self.draw_asset_settings(ui);
-        ui.weak("Auto-update: stub (deferred)");
-        if ui.button("Save settings").clicked() {
-            apply_launch_at_login(self.settings.launch_at_login);
-            self.input.apply_settings(&self.settings);
-            self.sync_emote_slots_from_settings();
-            self.audio.set_volume(self.settings.volume);
-            self.audio.set_muted(self.settings.muted);
-            match self.settings.save() {
-                Ok(()) => self.log("settings saved"),
-                Err(e) => self.log(format!("save failed: {e:#}")),
-            }
-        }
-    }
-}
-
-impl LolPingApp {
-    fn draw_asset_settings(&mut self, ui: &mut egui::Ui) {
-        use crate::remote::BulkState;
-        use std::sync::atomic::Ordering;
-        ui.strong("Assets");
-        let Some(v1) = self.catalog.store().cloned() else { return };
-        // With VP9 available, "download all" pulls the smaller v2 set (WebM emotes);
-        // its png/ogg/wav are shared with v1 lookups via extra_dirs.
-        let v2 = self.catalog.v2_store().cloned();
-        let store = v2.clone().unwrap_or_else(|| v1.clone());
-        ui.weak(if v2.is_some() { "Emotes: v2 WebM (VP9+alpha), v1 WebP fallback" } else { "Emotes: v1 WebP (built without VP9)" });
-        match &v1.local_root {
-            Some(p) => ui.weak(format!("Local bundle: {}", p.display())),
-            None => ui.weak(format!("Source: {}", store.base)),
+        let mut open_acc = || open_accessibility_settings();
+        let mut apply_launch = |on: bool| apply_launch_at_login(on);
+        let dirty_flag = std::cell::Cell::new(false);
+        let mut on_changed = |_s: &Settings| {
+            dirty_flag.set(true);
         };
-        for d in [&v1.cache_dir, &v2.as_ref().and_then(|v| v.cache_dir.clone())].into_iter().flatten() {
-            ui.weak(format!("Cache: {}", d.display()));
+
+        let mut open = self.show_settings;
+        {
+            let host = crate::ui::SettingsHost {
+                settings: &mut self.settings,
+                ui_state: &mut self.settings_ui,
+                input_status: &status,
+                needs_accessibility: needs,
+                hooks_live,
+                catalog: &self.catalog,
+                ping_icons: &self.ping_icons,
+                emote_icons: &self.emote_icons,
+                emote_names: &emote_names,
+                room: &mut self.room,
+                room_code_input: &mut self.room_code_input,
+                displays: &self.displays,
+                audio: &mut self.audio,
+                event_log: &log,
+                status_line: &status_line,
+                open_accessibility: &mut open_acc,
+                apply_launch_at_login: &mut apply_launch,
+                on_settings_changed: &mut on_changed,
+                close_requested: &mut close_requested,
+            };
+            crate::ui::paint_settings_viewport(ctx, &mut open, host);
         }
-        let mb = |b: u64| b as f64 / 1_048_576.0;
-        let size = v1.cache_size() + v2.as_ref().map(|v| v.cache_size()).unwrap_or(0);
-        ui.label(format!("Cache size: {:.1} MB", mb(size)));
-        let state = store.bulk_state.lock().unwrap().clone();
-        ui.horizontal(|ui| {
-            let running = matches!(state, BulkState::Running);
-            if ui.add_enabled(!running, egui::Button::new("Download all assets")).clicked() {
-                store.download_all_bg();
-            }
-            if ui.add_enabled(!running, egui::Button::new("Clear cache")).clicked() {
-                let r = v1.clear_cache().and_then(|_| v2.as_ref().map(|v| v.clear_cache()).unwrap_or(Ok(())));
-                match r {
-                    Ok(()) => self.log("asset cache cleared"),
-                    Err(e) => self.log(format!("clear cache failed: {e:#}")),
-                }
-            }
-        });
-        match state {
-            BulkState::Running => {
-                let done = store.bulk_done.load(Ordering::Relaxed);
-                let total = store.bulk_total.load(Ordering::Relaxed).max(1);
-                ui.add(
-                    egui::ProgressBar::new((done as f32 / total as f32).min(1.0))
-                        .text(format!("{:.1} / {:.1} MB", mb(done), mb(total))),
-                );
-                ui.ctx().request_repaint_after(std::time::Duration::from_millis(200));
-            }
-            BulkState::Done(n) => {
-                ui.weak(format!("Downloaded + verified {n} files"));
-            }
-            BulkState::Failed(e) => {
-                ui.colored_label(egui::Color32::LIGHT_RED, format!("Download failed: {e}"));
-            }
-            BulkState::Idle => {}
+        self.show_settings = open && !close_requested;
+        let dirty_apply = dirty_flag.get();
+        if dirty_apply {
+            let _ = self.settings.save();
+            self.input.apply_settings(&self.settings);
+            self.audio.set_volume(self.settings.volume);
+            self.audio.set_muted(self.settings.muted);
+            self.sync_emote_slots_from_settings();
         }
     }
 }
+
 
 fn open_accessibility_settings() {
     #[cfg(target_os = "macos")]

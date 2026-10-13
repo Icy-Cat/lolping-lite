@@ -42,6 +42,22 @@ pub struct Settings {
     pub pause_hotkey_label: String,
     /// Upstream `gameCheck` (default on): fullscreen apps keep the trigger; gestures resume on the desktop.
     pub game_check: bool,
+    /// Pixels the cursor must move before the wheel opens (upstream dragThresholdPx).
+    pub drag_threshold_px: u32,
+    /// Alt/trigger + click places centre ping (upstream clickPing).
+    pub click_ping: bool,
+    /// Centre ping id for click-ping.
+    pub click_ping_id: String,
+    /// Quiet click when hovering a new wheel slice.
+    pub tick_sound: bool,
+    /// Pinging on at launch (upstream enabledOnStart).
+    pub enabled_on_start: bool,
+    /// Play emote-owned sounds.
+    pub emote_sound: bool,
+    /// Hide remote room FX locally.
+    pub room_muted: bool,
+    /// Rejoin last room on launch (stored; wiring optional).
+    pub rejoin_room: bool,
 }
 
 impl Default for Settings {
@@ -66,6 +82,14 @@ impl Default for Settings {
             auto_update_check: false,
             pause_hotkey_label: "Ctrl+Alt+P".into(),
             game_check: true,
+            drag_threshold_px: 8,
+            click_ping: false,
+            click_ping_id: "omw".into(),
+            tick_sound: true,
+            enabled_on_start: true,
+            emote_sound: true,
+            room_muted: false,
+            rejoin_room: false,
         }
     }
 }

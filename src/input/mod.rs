@@ -15,8 +15,7 @@ pub use config::{new_shared, update_config, InputConfig, SharedConfig};
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::sync::{Arc, Mutex};
 
-#[derive(Debug, Clone, Copy, PartialEq)]
-#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HookStatus {
     Starting,
     Running,
